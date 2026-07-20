@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"html/template"
 	"os/exec"
 	"testing"
@@ -67,6 +68,20 @@ func NewPermissionDeniedResponse() fantasy.ToolResponse {
 	resp := fantasy.NewTextErrorResponse("User denied permission")
 	resp.StopTurn = true
 	return resp
+}
+
+// NewClassifierDeniedResponse returns a tool response indicating the
+// auto-mode classifier blocked the action. Unlike
+// NewPermissionDeniedResponse, StopTurn is false so the agent can
+// retry with a safer alternative (deny-and-continue pattern).
+func NewClassifierDeniedResponse(reason string) fantasy.ToolResponse {
+	msg := fmt.Sprintf(
+		"Action blocked by auto-mode safety classifier: %s\n\n"+
+			"Find a safer alternative approach. Do not attempt to "+
+			"circumvent this restriction.",
+		reason,
+	)
+	return fantasy.NewTextErrorResponse(msg)
 }
 
 // ghAvailable indicates whether the `gh` CLI is available on PATH.

@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/classifier"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/permission"
@@ -224,6 +225,23 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 			if sessionID == "" {
 				return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for executing shell command")
 			}
+
+			// In auto mode, statically dangerous commands are denied
+			// before reaching the permission service. This is an
+			// absolute barrier that hooks cannot bypass.
+			if permissions.AutoMode() {
+				if classifier.IsDangerousCommand(params.Command) {
+					return NewClassifierDeniedResponse(
+						"command matches a statically dangerous pattern and cannot be auto-approved",
+					), nil
+				}
+				if containsBannedCommand(params.Command) {
+					return NewClassifierDeniedResponse(
+						"command uses a banned program and cannot be auto-approved",
+					), nil
+				}
+			}
+
 			if !isSafeReadOnly {
 				p, err := permissions.Request(
 					ctx,

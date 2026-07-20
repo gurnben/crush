@@ -50,6 +50,7 @@ type fileSnapshot struct {
 // the lifetime of the process (or workspace).
 type RuntimeOverrides struct {
 	SkipPermissionRequests bool
+	AutoMode               bool
 }
 
 // ConfigStore is the single entry point for all config access. It owns the
@@ -1074,6 +1075,7 @@ func (s *ConfigStore) reloadFromDiskLocked(ctx context.Context) error {
 		} else {
 			cfg.Models[SelectedModelTypeLarge] = resolved.Large
 			cfg.Models[SelectedModelTypeSmall] = resolved.Small
+			cfg.Models[SelectedModelTypeClassifier] = resolved.Classifier
 			s.SetupAgents()
 		}
 	}

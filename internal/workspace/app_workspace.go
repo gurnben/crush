@@ -257,6 +257,17 @@ func (w *AppWorkspace) PermissionSetSkipRequests(skip bool) {
 	w.app.Permissions.SetSkipRequests(skip)
 }
 
+func (w *AppWorkspace) PermissionAutoMode() bool {
+	return w.app.Permissions.AutoMode()
+}
+
+func (w *AppWorkspace) PermissionSetAutoMode(enabled bool) {
+	w.app.Permissions.SetAutoMode(enabled)
+	if enabled {
+		w.app.EnsureClassifier(context.Background())
+	}
+}
+
 // -- Questions --
 
 func (w *AppWorkspace) QuestionAnswer(responses []question.Answer) bool {

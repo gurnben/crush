@@ -22,6 +22,7 @@ type ModelType int
 const (
 	ModelTypeLarge ModelType = iota
 	ModelTypeSmall
+	ModelTypeClassifier
 )
 
 // String returns the string representation of the [ModelType].
@@ -31,6 +32,8 @@ func (mt ModelType) String() string {
 		return "Large Task"
 	case ModelTypeSmall:
 		return "Small Task"
+	case ModelTypeClassifier:
+		return "Classifier"
 	default:
 		return "Unknown"
 	}
@@ -43,6 +46,8 @@ func (mt ModelType) Config() config.SelectedModelType {
 		return config.SelectedModelTypeLarge
 	case ModelTypeSmall:
 		return config.SelectedModelTypeSmall
+	case ModelTypeClassifier:
+		return config.SelectedModelTypeClassifier
 	default:
 		return ""
 	}
@@ -55,6 +60,8 @@ func (mt ModelType) Placeholder() string {
 		return largeModelInputPlaceholder
 	case ModelTypeSmall:
 		return smallModelInputPlaceholder
+	case ModelTypeClassifier:
+		return classifierModelInputPlaceholder
 	default:
 		return ""
 	}
@@ -64,6 +71,7 @@ const (
 	onboardingModelInputPlaceholder = "Find your fave"
 	largeModelInputPlaceholder      = "Choose a model for large, complex tasks"
 	smallModelInputPlaceholder      = "Choose a model for small, simple tasks"
+	classifierModelInputPlaceholder = "Choose a model for auto-mode safety classification"
 )
 
 // ModelsID is the identifier for the model selection dialog.
@@ -206,9 +214,12 @@ func (m *Models) HandleMsg(msg tea.Msg) Action {
 			if m.isOnboarding {
 				break
 			}
-			if m.modelType == ModelTypeLarge {
+			switch m.modelType {
+			case ModelTypeLarge:
 				m.modelType = ModelTypeSmall
-			} else {
+			case ModelTypeSmall:
+				m.modelType = ModelTypeClassifier
+			default:
 				m.modelType = ModelTypeLarge
 			}
 			if err := m.setProviderItems(); err != nil {
@@ -239,18 +250,24 @@ func (m *Models) modelTypeRadioView() string {
 	textStyle := t.Radio.Label
 	largeRadioStyle := t.Radio.Off
 	smallRadioStyle := t.Radio.Off
-	if m.modelType == ModelTypeLarge {
+	classifierRadioStyle := t.Radio.Off
+	switch m.modelType {
+	case ModelTypeLarge:
 		largeRadioStyle = t.Radio.On
-	} else {
+	case ModelTypeSmall:
 		smallRadioStyle = t.Radio.On
+	case ModelTypeClassifier:
+		classifierRadioStyle = t.Radio.On
 	}
 
 	largeRadio := largeRadioStyle.Padding(0, 1).Render()
 	smallRadio := smallRadioStyle.Padding(0, 1).Render()
+	classifierRadio := classifierRadioStyle.Padding(0, 1).Render()
 
-	return fmt.Sprintf("%s%s  %s%s",
+	return fmt.Sprintf("%s%s  %s%s  %s%s",
 		largeRadio, textStyle.Render(ModelTypeLarge.String()),
-		smallRadio, textStyle.Render(ModelTypeSmall.String()))
+		smallRadio, textStyle.Render(ModelTypeSmall.String()),
+		classifierRadio, textStyle.Render(ModelTypeClassifier.String()))
 }
 
 // Draw implements [Dialog].

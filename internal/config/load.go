@@ -131,6 +131,7 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 	}
 	cfg.Models[SelectedModelTypeLarge] = resolved.Large
 	cfg.Models[SelectedModelTypeSmall] = resolved.Small
+	cfg.Models[SelectedModelTypeClassifier] = resolved.Classifier
 
 	// Persist any fallback corrections while we still hold writeMu.
 	if resolved.LargeFallback {
@@ -733,6 +734,7 @@ func (c *Config) defaultModelSelection(knownProviders []catwalk.Provider) (large
 type resolvedModels struct {
 	Large         SelectedModel
 	Small         SelectedModel
+	Classifier    SelectedModel
 	LargeFallback bool // true if Large was corrected to a default
 	SmallFallback bool // true if Small was corrected to a default
 }
@@ -854,6 +856,34 @@ func resolveSelectedModels(cfg *Config, knownProviders []catwalk.Provider) (reso
 
 	result.Large = large
 	result.Small = small
+
+	// Resolve classifier model: explicit config → small → large.
+	classifier := small
+	if classifierSelected, ok := cfg.Models[SelectedModelTypeClassifier]; ok {
+		if classifierSelected.Model != "" {
+			classifier.Model = classifierSelected.Model
+		}
+		if classifierSelected.Provider != "" {
+			classifier.Provider = classifierSelected.Provider
+		}
+		model := cfg.GetModel(classifier.Provider, classifier.Model)
+		if model == nil {
+			slog.Warn("Classifier model not found in provider catalog, falling back to small model",
+				"provider", classifier.Provider, "model", classifier.Model)
+			classifier = small
+		} else {
+			if classifierSelected.MaxTokens > 0 {
+				classifier.MaxTokens = classifierSelected.MaxTokens
+			} else {
+				classifier.MaxTokens = model.DefaultMaxTokens
+			}
+			if classifierSelected.Temperature != nil {
+				classifier.Temperature = classifierSelected.Temperature
+			}
+		}
+	}
+	result.Classifier = classifier
+
 	return result, nil
 }
 

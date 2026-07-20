@@ -1310,6 +1310,8 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if !m.bangMode && m.yoloModeCached() {
 			m.textarea.Placeholder = "Yolo mode!"
+		} else if !m.bangMode && m.com.Workspace.PermissionAutoMode() {
+			m.textarea.Placeholder = "Auto mode"
 		}
 	}
 
@@ -1767,6 +1769,14 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 	case dialog.ActionToggleYoloMode:
 		m.toggleYoloMode()
 		m.dialog.CloseDialog(dialog.CommandsID)
+	case dialog.ActionToggleAutoMode:
+		autoMode := m.toggleAutoMode()
+		m.dialog.CloseDialog(dialog.CommandsID)
+		status := "disabled"
+		if autoMode {
+			status = "enabled"
+		}
+		cmds = append(cmds, util.ReportInfo("Auto mode "+status))
 	case dialog.ActionSelectNotificationStyle:
 		cfg := m.com.Config()
 		if cfg != nil && cfg.Options != nil {
@@ -3539,7 +3549,7 @@ func (m *UI) openEditor(value string) tea.Cmd {
 }
 
 // setEditorPrompt configures the textarea prompt function based on whether
-// yolo mode or bang mode is enabled.
+// yolo mode, auto mode, or bang mode is enabled.
 func (m *UI) setEditorPrompt(yolo bool) {
 	if m.bangMode {
 		m.textarea.SetPromptFunc(4, m.bangPromptFunc)
@@ -3547,6 +3557,10 @@ func (m *UI) setEditorPrompt(yolo bool) {
 	}
 	if yolo {
 		m.textarea.SetPromptFunc(4, m.yoloPromptFunc)
+		return
+	}
+	if m.com.Workspace.PermissionAutoMode() {
+		m.textarea.SetPromptFunc(4, m.autoPromptFunc)
 		return
 	}
 	m.textarea.SetPromptFunc(4, m.normalPromptFunc)
@@ -3583,6 +3597,22 @@ func (m *UI) yoloPromptFunc(info textarea.PromptInfo) string {
 		return t.Editor.PromptYoloDotsFocused.Render()
 	}
 	return t.Editor.PromptYoloDotsBlurred.Render()
+}
+
+// autoPromptFunc returns the auto mode editor prompt style with an "A" icon
+// and colored dots.
+func (m *UI) autoPromptFunc(info textarea.PromptInfo) string {
+	t := m.com.Styles
+	if info.LineNumber == 0 {
+		if info.Focused {
+			return t.Editor.PromptAutoIconFocused.Render()
+		}
+		return t.Editor.PromptAutoIconBlurred.Render()
+	}
+	if info.Focused {
+		return t.Editor.PromptAutoDotsFocused.Render()
+	}
+	return t.Editor.PromptAutoDotsBlurred.Render()
 }
 
 // bangPromptFunc returns the bang mode editor prompt style with Turtle-colored

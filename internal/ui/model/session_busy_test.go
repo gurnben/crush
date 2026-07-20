@@ -63,6 +63,10 @@ func (w *countingWorkspace) PermissionSetSkipRequests(skip bool) {
 	w.yolo = skip
 }
 
+func (w *countingWorkspace) PermissionAutoMode() bool { return false }
+
+func (w *countingWorkspace) PermissionSetAutoMode(enabled bool) {}
+
 func (w *countingWorkspace) AgentClearQueue(string) { w.clearQueueCalls++; w.queued = nil }
 func (w *countingWorkspace) AgentCancel(string)     { w.cancelCalls++ }
 

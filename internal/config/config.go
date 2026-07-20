@@ -52,8 +52,9 @@ func (s SelectedModelType) String() string {
 }
 
 const (
-	SelectedModelTypeLarge SelectedModelType = "large"
-	SelectedModelTypeSmall SelectedModelType = "small"
+	SelectedModelTypeLarge      SelectedModelType = "large"
+	SelectedModelTypeSmall      SelectedModelType = "small"
+	SelectedModelTypeClassifier SelectedModelType = "classifier"
 )
 
 const (
@@ -246,8 +247,58 @@ const (
 	ScrollbarNever   = "never"   // Never show scrollbar
 )
 
+// PermissionsMode controls how tool calls are approved.
+type PermissionsMode string
+
+const (
+	// PermissionsModeManual prompts the user for every non-safe tool call.
+	PermissionsModeManual PermissionsMode = "manual"
+	// PermissionsModeAuto uses a classifier model to gate ambiguous tool
+	// calls, falling back to user prompts only when the classifier
+	// escalates or hits the denial circuit breaker.
+	PermissionsModeAuto PermissionsMode = "auto"
+	// PermissionsModeYolo approves everything with no guardrails.
+	PermissionsModeYolo PermissionsMode = "yolo"
+)
+
+// AutoModeConfig holds settings specific to auto permission mode.
+type AutoModeConfig struct {
+	// ClassifierTimeout is the max seconds to wait for a classifier
+	// response before escalating to the user.
+	ClassifierTimeout int `json:"classifier_timeout,omitempty" jsonschema:"description=Max seconds to wait for classifier response before escalating,default=5"`
+	// MaxConsecutiveDenials is the number of consecutive classifier
+	// denials before falling back to manual mode.
+	MaxConsecutiveDenials int `json:"max_consecutive_denials,omitempty" jsonschema:"description=Consecutive classifier denials before falling back to manual,default=3"`
+	// MaxTotalDenials is the total number of classifier denials in a
+	// session before falling back to manual mode.
+	MaxTotalDenials int `json:"max_total_denials,omitempty" jsonschema:"description=Total classifier denials before falling back to manual,default=20"`
+	// TrustProjectWrites auto-approves in-project file writes without
+	// invoking the classifier.
+	TrustProjectWrites *bool `json:"trust_project_writes,omitempty" jsonschema:"description=Auto-approve in-project file writes without classifier,default=true"`
+}
+
+// Defaults returns a copy of c with zero-value fields filled in.
+func (a AutoModeConfig) Defaults() AutoModeConfig {
+	if a.ClassifierTimeout <= 0 {
+		a.ClassifierTimeout = 5
+	}
+	if a.MaxConsecutiveDenials <= 0 {
+		a.MaxConsecutiveDenials = 3
+	}
+	if a.MaxTotalDenials <= 0 {
+		a.MaxTotalDenials = 20
+	}
+	if a.TrustProjectWrites == nil {
+		t := true
+		a.TrustProjectWrites = &t
+	}
+	return a
+}
+
 type Permissions struct {
-	AllowedTools []string `json:"allowed_tools,omitempty" jsonschema:"description=List of tools that don't require permission prompts,example=bash,example=view"`
+	AllowedTools []string        `json:"allowed_tools,omitempty" jsonschema:"description=List of tools that don't require permission prompts,example=bash,example=view"`
+	Mode         PermissionsMode `json:"mode,omitempty" jsonschema:"description=Permission mode: manual (default) auto or yolo,enum=manual,enum=auto,enum=yolo,default=manual"`
+	Auto         *AutoModeConfig `json:"auto,omitempty" jsonschema:"description=Settings for auto permission mode"`
 }
 
 type TrailerStyle string

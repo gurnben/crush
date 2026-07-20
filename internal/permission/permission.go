@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/charmbracelet/crush/internal/classifier"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/google/uuid"
@@ -62,6 +63,15 @@ type PermissionRequest struct {
 	Path        string `json:"path"`
 }
 
+// RequestResult is the outcome of a permission request. Callers should
+// check Granted first; when it is false ClassifierDenied distinguishes
+// a classifier denial (turn continues) from a user denial (turn stops).
+type RequestResult struct {
+	Granted          bool
+	ClassifierDenied bool
+	DenialReason     string
+}
+
 type Service interface {
 	pubsub.Subscriber[PermissionRequest]
 	// GrantPersistent grants a permission request and remembers the grant
@@ -78,9 +88,16 @@ type Service interface {
 	// already been resolved or is unknown.
 	Deny(permission PermissionRequest) bool
 	Request(ctx context.Context, opts CreatePermissionRequest) (bool, error)
+	// RequestWithResult is like Request but returns a richer result that
+	// distinguishes classifier denials (turn continues) from user
+	// denials (turn stops).
+	RequestWithResult(ctx context.Context, opts CreatePermissionRequest) (RequestResult, error)
 	AutoApproveSession(sessionID string)
 	SetSkipRequests(skip bool)
 	SkipRequests() bool
+	AutoMode() bool
+	SetAutoMode(enabled bool)
+	SetClassifier(c *classifier.Service)
 	SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[PermissionNotification]
 }
 
@@ -102,7 +119,9 @@ type permissionService struct {
 	autoApproveSessions   map[string]bool
 	autoApproveSessionsMu sync.RWMutex
 	skip                  atomic.Bool
+	autoMode              atomic.Bool
 	allowedTools          []string
+	classifier            *classifier.Service
 
 	// used to make sure we only process one request at a time
 	requestMu       sync.Mutex
@@ -189,6 +208,36 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 		return true, nil
 	}
 
+	// Auto-mode classifier: runs BEFORE hook approval so the static
+	// deny list cannot be bypassed by hooks. If the classifier returns
+	// Allow, we still let the hook approval fast-path below handle it.
+	// If it returns Deny, we block regardless of hook decisions.
+	if s.autoMode.Load() && s.classifier != nil {
+		result := s.classifier.Classify(ctx, classifier.ClassifyRequest{
+			ToolName:   opts.ToolName,
+			Action:     opts.Action,
+			Params:     opts.Params,
+			Path:       opts.Path,
+			WorkingDir: s.workingDir,
+		})
+		switch result.Verdict {
+		case classifier.VerdictAllow:
+			s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+				ToolCallID: opts.ToolCallID,
+				Granted:    true,
+			})
+			return true, nil
+		case classifier.VerdictDeny:
+			s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+				ToolCallID: opts.ToolCallID,
+				Denied:     true,
+			})
+			return false, nil
+		case classifier.VerdictEscalate:
+			// Fall through to hook approval or user prompt below.
+		}
+	}
+
 	// A PreToolUse hook that returned decision=allow stamps the context
 	// with the tool call ID. Treat that as a pre-approval and skip the
 	// prompt entirely. We still publish a granted notification so the UI
@@ -203,11 +252,6 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 
 	s.requestMu.Lock()
 	defer s.requestMu.Unlock()
-
-	// tell the UI that a permission was requested
-	s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
-		ToolCallID: opts.ToolCallID,
-	})
 
 	s.autoApproveSessionsMu.RLock()
 	autoApprove := s.autoApproveSessions[opts.SessionID]
@@ -258,6 +302,12 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 		return true, nil
 	}
 
+	// Tell the UI that a permission prompt is needed (only reaches here
+	// if auto-mode/session-approve/allowlist did not handle it above).
+	s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+		ToolCallID: opts.ToolCallID,
+	})
+
 	s.activeRequestMu.Lock()
 	s.activeRequest = &permission
 	s.activeRequestMu.Unlock()
@@ -295,6 +345,29 @@ func (s *permissionService) SkipRequests() bool {
 	return s.skip.Load()
 }
 
+func (s *permissionService) AutoMode() bool {
+	return s.autoMode.Load()
+}
+
+func (s *permissionService) SetAutoMode(enabled bool) {
+	s.autoMode.Store(enabled)
+}
+
+// RequestWithResult is like Request but returns a richer result.
+func (s *permissionService) RequestWithResult(ctx context.Context, opts CreatePermissionRequest) (RequestResult, error) {
+	granted, err := s.Request(ctx, opts)
+	if err != nil {
+		return RequestResult{}, err
+	}
+	return RequestResult{Granted: granted}, nil
+}
+
+// SetClassifier sets the classifier service for auto-mode decisions.
+func (s *permissionService) SetClassifier(c *classifier.Service) {
+	s.classifier = c
+}
+
+// NewPermissionService creates a new permission service.
 func NewPermissionService(workingDir string, skip bool, allowedTools []string) Service {
 	svc := &permissionService{
 		Broker:              pubsub.NewBroker[PermissionRequest](),
@@ -306,5 +379,22 @@ func NewPermissionService(workingDir string, skip bool, allowedTools []string) S
 		pendingRequests:     csync.NewMap[string, chan bool](),
 	}
 	svc.skip.Store(skip)
+	return svc
+}
+
+// NewPermissionServiceWithAutoMode creates a permission service with
+// auto-mode classification enabled.
+func NewPermissionServiceWithAutoMode(workingDir string, allowedTools []string, classifierSvc *classifier.Service) Service {
+	svc := &permissionService{
+		Broker:              pubsub.NewBroker[PermissionRequest](),
+		notificationBroker:  pubsub.NewBroker[PermissionNotification](),
+		workingDir:          workingDir,
+		sessionPermissions:  csync.NewMap[PermissionKey, bool](),
+		autoApproveSessions: make(map[string]bool),
+		allowedTools:        allowedTools,
+		pendingRequests:     csync.NewMap[string, chan bool](),
+		classifier:          classifierSvc,
+	}
+	svc.autoMode.Store(true)
 	return svc
 }

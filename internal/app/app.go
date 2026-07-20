@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
+	"github.com/charmbracelet/crush/internal/classifier"
 	"github.com/charmbracelet/crush/internal/clipboard"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
@@ -103,16 +104,33 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	files := history.NewService(q, conn)
 	cfg := store.Config()
 	skipPermissionsRequests := store.Overrides().SkipPermissionRequests
+	isAutoMode := store.Overrides().AutoMode
+	if !isAutoMode && cfg.Permissions != nil && cfg.Permissions.Mode == config.PermissionsModeAuto {
+		isAutoMode = true
+	}
+	if !isAutoMode && cfg.Permissions != nil && cfg.Permissions.Mode == config.PermissionsModeYolo {
+		skipPermissionsRequests = true
+	}
 	var allowedTools []string
 	if cfg.Permissions != nil && cfg.Permissions.AllowedTools != nil {
 		allowedTools = cfg.Permissions.AllowedTools
+	}
+
+	// The permission service is created here without the classifier model.
+	// The classifier is injected later in initCoderAgent once the
+	// coordinator (and its provider-building machinery) is available.
+	var permSvc permission.Service
+	if isAutoMode {
+		permSvc = permission.NewPermissionServiceWithAutoMode(store.WorkingDir(), allowedTools, nil)
+	} else {
+		permSvc = permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools)
 	}
 
 	app := &App{
 		Sessions:    sessions,
 		Messages:    messages,
 		History:     files,
-		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools),
+		Permissions: permSvc,
 		Questions:   question.NewService(),
 		FileTracker: filetracker.NewService(q),
 		LSPManager:  lsp.NewManager(store),
@@ -657,7 +675,34 @@ func (app *App) initCoderAgent(ctx context.Context, interactive bool) error {
 		slog.Error("Failed to create coder agent", "err", err)
 		return err
 	}
+
+	// If auto mode is active, build the classifier model now that the
+	// coordinator (and its provider-building machinery) is available,
+	// then inject it into the permission service.
+	if app.Permissions.AutoMode() {
+		app.EnsureClassifier(ctx)
+	}
+
 	return nil
+}
+
+// EnsureClassifier builds the classifier model and injects it into the
+// permission service if one is not already set. Safe to call multiple
+// times; subsequent calls rebuild the classifier (e.g., after a model
+// change in the picker).
+func (app *App) EnsureClassifier(ctx context.Context) {
+	classifierModel := agent.BuildClassifierModel(ctx, app.config)
+	if classifierModel != nil {
+		var autoCfg config.AutoModeConfig
+		if cfg := app.config.Config(); cfg.Permissions != nil && cfg.Permissions.Auto != nil {
+			autoCfg = *cfg.Permissions.Auto
+		}
+		classifierSvc := classifier.NewService(classifierModel, autoCfg)
+		app.Permissions.SetClassifier(classifierSvc)
+		slog.Info("Auto mode classifier initialized")
+	} else {
+		slog.Warn("Auto mode enabled but no classifier model could be built; ambiguous calls will escalate to user")
+	}
 }
 
 // Subscribe sends events to the TUI as tea.Msgs.

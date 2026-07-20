@@ -282,3 +282,18 @@ func (m *UI) toggleYoloMode() bool {
 func (m *UI) yoloModeCached() bool {
 	return m.yoloCache.val
 }
+
+// toggleAutoMode flips auto-mode permission classification. When auto mode
+// is enabled, yolo mode is disabled (they are mutually exclusive). Returns
+// the new auto mode state.
+func (m *UI) toggleAutoMode() bool {
+	autoMode := !m.com.Workspace.PermissionAutoMode()
+	m.com.Workspace.PermissionSetAutoMode(autoMode)
+	if autoMode {
+		m.com.Workspace.PermissionSetSkipRequests(false)
+		m.yoloCache.set(false)
+	}
+	m.busyFetchGen++
+	m.setEditorPrompt(m.yoloModeCached())
+	return autoMode
+}

@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/classifier"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -38,6 +39,18 @@ func (m *mockBashPermissionService) SetSkipRequests(skip bool) {}
 func (m *mockBashPermissionService) SkipRequests() bool {
 	return false
 }
+
+func (m *mockBashPermissionService) AutoMode() bool {
+	return false
+}
+
+func (m *mockBashPermissionService) RequestWithResult(ctx context.Context, opts permission.CreatePermissionRequest) (permission.RequestResult, error) {
+	return permission.RequestResult{Granted: true}, nil
+}
+
+func (m *mockBashPermissionService) SetClassifier(c *classifier.Service) {}
+
+func (m *mockBashPermissionService) SetAutoMode(enabled bool) {}
 
 func (m *mockBashPermissionService) SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[permission.PermissionNotification] {
 	return make(<-chan pubsub.Event[permission.PermissionNotification])
@@ -109,6 +122,19 @@ func (m *recordingPermissionService) SetSkipRequests(skip bool) {}
 func (m *recordingPermissionService) SkipRequests() bool {
 	return false
 }
+
+func (m *recordingPermissionService) AutoMode() bool {
+	return false
+}
+
+func (m *recordingPermissionService) RequestWithResult(ctx context.Context, opts permission.CreatePermissionRequest) (permission.RequestResult, error) {
+	granted, err := m.Request(ctx, opts)
+	return permission.RequestResult{Granted: granted}, err
+}
+
+func (m *recordingPermissionService) SetClassifier(c *classifier.Service) {}
+
+func (m *recordingPermissionService) SetAutoMode(enabled bool) {}
 
 func (m *recordingPermissionService) SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[permission.PermissionNotification] {
 	return make(<-chan pubsub.Event[permission.PermissionNotification])

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/classifier"
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -231,6 +232,18 @@ func (m *mockViewPermissionService) SetSkipRequests(skip bool) {}
 func (m *mockViewPermissionService) SkipRequests() bool {
 	return false
 }
+
+func (m *mockViewPermissionService) AutoMode() bool {
+	return false
+}
+
+func (m *mockViewPermissionService) RequestWithResult(ctx context.Context, opts permission.CreatePermissionRequest) (permission.RequestResult, error) {
+	return permission.RequestResult{Granted: true}, nil
+}
+
+func (m *mockViewPermissionService) SetClassifier(c *classifier.Service) {}
+
+func (m *mockViewPermissionService) SetAutoMode(enabled bool) {}
 
 func (m *mockViewPermissionService) SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[permission.PermissionNotification] {
 	return make(<-chan pubsub.Event[permission.PermissionNotification])

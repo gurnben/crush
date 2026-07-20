@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/classifier"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -38,6 +39,18 @@ func (m *mockPermissionService) SetSkipRequests(skip bool) {}
 func (m *mockPermissionService) SkipRequests() bool {
 	return false
 }
+
+func (m *mockPermissionService) AutoMode() bool {
+	return false
+}
+
+func (m *mockPermissionService) RequestWithResult(ctx context.Context, opts permission.CreatePermissionRequest) (permission.RequestResult, error) {
+	return permission.RequestResult{Granted: true}, nil
+}
+
+func (m *mockPermissionService) SetClassifier(c *classifier.Service) {}
+
+func (m *mockPermissionService) SetAutoMode(enabled bool) {}
 
 func (m *mockPermissionService) SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[permission.PermissionNotification] {
 	return make(<-chan pubsub.Event[permission.PermissionNotification])

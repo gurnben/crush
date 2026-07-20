@@ -16,6 +16,7 @@ type Workspace struct {
 	ID       string         `json:"id"`
 	Path     string         `json:"path"`
 	YOLO     bool           `json:"yolo,omitempty"`
+	AutoMode bool           `json:"auto_mode,omitempty"`
 	Debug    bool           `json:"debug,omitempty"`
 	DataDir  string         `json:"data_dir,omitempty"`
 	Version  string         `json:"version,omitempty"`

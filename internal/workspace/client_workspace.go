@@ -347,6 +347,15 @@ func (w *ClientWorkspace) PermissionSetSkipRequests(skip bool) {
 	_ = w.client.SetPermissionsSkipRequests(context.Background(), w.workspaceID(), skip)
 }
 
+func (w *ClientWorkspace) PermissionAutoMode() bool {
+	// Auto mode is not yet supported over the client protocol.
+	return false
+}
+
+func (w *ClientWorkspace) PermissionSetAutoMode(enabled bool) {
+	// Auto mode is not yet supported over the client protocol.
+}
+
 // -- Questions --
 
 // QuestionAnswer submits answers for a question via the client SDK.
