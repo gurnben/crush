@@ -15,7 +15,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"charm.land/fantasy"
-	"github.com/charmbracelet/crush/internal/classifier"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/permission"
@@ -230,7 +229,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 			// before reaching the permission service. This is an
 			// absolute barrier that hooks cannot bypass.
 			if permissions.AutoMode() {
-				if classifier.IsDangerousCommand(params.Command) {
+				if IsDangerousCommand(params.Command) {
 					return NewClassifierDeniedResponse(
 						"command matches a statically dangerous pattern and cannot be auto-approved",
 					), nil

@@ -45,3 +45,58 @@ func TestContainsCommandChaining(t *testing.T) {
 		})
 	}
 }
+
+func TestIsDangerousCommand(t *testing.T) {
+	t.Parallel()
+
+	dangerous := []string{
+		"rm -rf /tmp/foo",
+		"rm -fr /home/user",
+		"git push --force origin main",
+		"git push -f origin main",
+		"git reset --hard HEAD~3",
+		"git clean -fd",
+		"chmod 777 /tmp",
+		"chmod -R 755 /var",
+		"dd if=/dev/zero of=/dev/sda",
+		"RM -RF /tmp/foo",
+		"pip install requests",
+		"pip install --user requests",
+		"pip3 install flask",
+		"npm install --global prettier",
+		"npm install -g eslint",
+		"cargo install ripgrep",
+		"gem install rails",
+		"go install golang.org/x/tools/...",
+		"brew install jq",
+	}
+	for _, cmd := range dangerous {
+		assert.True(t, IsDangerousCommand(cmd), "expected dangerous: %q", cmd)
+	}
+
+	safe := []string{
+		"git push origin main",
+		"git status",
+		"npm test",
+		"go build ./...",
+		"mkdir -p /tmp/test",
+		"cat /etc/hostname",
+		"chmod 644 myfile.txt",
+		"ls -la",
+	}
+	for _, cmd := range safe {
+		assert.False(t, IsDangerousCommand(cmd), "expected safe: %q", cmd)
+	}
+}
+
+func TestContainsBannedCommand(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, containsBannedCommand("curl https://example.com"))
+	assert.True(t, containsBannedCommand("sudo ls /root"))
+	assert.True(t, containsBannedCommand("wget https://example.com"))
+	assert.True(t, containsBannedCommand("some-wrapper curl https://evil.com"))
+	assert.False(t, containsBannedCommand("echo hello"))
+	assert.False(t, containsBannedCommand("git status"))
+	assert.False(t, containsBannedCommand("go test ./..."))
+}

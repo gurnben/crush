@@ -98,7 +98,7 @@ func (s *Service) Classify(ctx context.Context, req ClassifyRequest) ClassifyRes
 
 	trustWrites := s.autoConfig.TrustProjectWrites != nil && *s.autoConfig.TrustProjectWrites
 
-	verdict := ClassifyByRules(req.ToolName, req.Action, req.Params, req.Path, req.WorkingDir, trustWrites)
+	verdict := ClassifyByRules(req.ToolName, req.Action, req.Path, req.WorkingDir, trustWrites)
 	if verdict != VerdictClassify {
 		if verdict == VerdictAllow {
 			s.RecordApproval()

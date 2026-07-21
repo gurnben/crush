@@ -6,6 +6,20 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestMain(m *testing.M) {
+	// Initialize tool categories for tests since the canonical lists
+	// live in the tools package which we can't import here.
+	InitToolCategories(
+		[]string{"view", "ls", "glob", "grep", "lsp_diagnostics", "lsp_references",
+			"lsp_symbols", "lsp_definition", "lsp_call_hierarchy", "sourcegraph",
+			"crush_info", "crush_logs", "job_output", "todos", "question",
+			"list_mcp_resources", "read_mcp_resource", "fetch", "agentic_fetch"},
+		[]string{"edit", "multiedit", "write", "lsp_rename", "lsp_replace_symbol"},
+		[]string{"job_kill", "lsp_restart"},
+	)
+	m.Run()
+}
+
 func TestClassifyByRules(t *testing.T) {
 	t.Parallel()
 
@@ -13,7 +27,6 @@ func TestClassifyByRules(t *testing.T) {
 		name               string
 		toolName           string
 		action             string
-		params             any
 		path               string
 		workingDir         string
 		trustProjectWrites bool
@@ -152,52 +165,9 @@ func TestClassifyByRules(t *testing.T) {
 			expected:           VerdictAllow,
 		},
 		{
-			name:     "bash safe command goes to classifier",
+			name:     "bash goes to classifier",
 			toolName: "bash",
 			action:   "execute",
-			params:   map[string]string{"command": "npm test"},
-			expected: VerdictClassify,
-		},
-		{
-			name:     "bash rm -rf is denied by static rules",
-			toolName: "bash",
-			action:   "execute",
-			params:   map[string]string{"command": "rm -rf /tmp/something"},
-			expected: VerdictDeny,
-		},
-		{
-			name:     "bash git push --force is denied by static rules",
-			toolName: "bash",
-			action:   "execute",
-			params:   map[string]string{"command": "git push --force origin main"},
-			expected: VerdictDeny,
-		},
-		{
-			name:     "bash git push -f is denied by static rules",
-			toolName: "bash",
-			action:   "execute",
-			params:   map[string]string{"command": "git push -f origin main"},
-			expected: VerdictDeny,
-		},
-		{
-			name:     "bash chmod 777 is denied by static rules",
-			toolName: "bash",
-			action:   "execute",
-			params:   map[string]string{"command": "chmod 777 /tmp"},
-			expected: VerdictDeny,
-		},
-		{
-			name:     "bash git reset --hard is denied",
-			toolName: "bash",
-			action:   "execute",
-			params:   map[string]string{"command": "git reset --hard HEAD~3"},
-			expected: VerdictDeny,
-		},
-		{
-			name:     "bash nil params goes to classifier",
-			toolName: "bash",
-			action:   "execute",
-			params:   nil,
 			expected: VerdictClassify,
 		},
 		{
@@ -235,9 +205,9 @@ func TestClassifyByRules(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := ClassifyByRules(tt.toolName, tt.action, tt.params, tt.path, tt.workingDir, tt.trustProjectWrites)
-			assert.Equal(t, tt.expected, got, "ClassifyByRules(%q, %q, %v, %q, %q, %v)",
-				tt.toolName, tt.action, tt.params, tt.path, tt.workingDir, tt.trustProjectWrites)
+			got := ClassifyByRules(tt.toolName, tt.action, tt.path, tt.workingDir, tt.trustProjectWrites)
+			assert.Equal(t, tt.expected, got, "ClassifyByRules(%q, %q, %q, %q, %v)",
+				tt.toolName, tt.action, tt.path, tt.workingDir, tt.trustProjectWrites)
 		})
 	}
 }
@@ -329,60 +299,4 @@ func TestVerdictString(t *testing.T) {
 	assert.Equal(t, "DENY", VerdictDeny.String())
 	assert.Equal(t, "ESCALATE", VerdictEscalate.String())
 	assert.Equal(t, "CLASSIFY", VerdictClassify.String())
-}
-
-func TestIsDangerousCommand(t *testing.T) {
-	t.Parallel()
-
-	dangerous := []string{
-		"rm -rf /tmp/foo",
-		"rm -fr /home/user",
-		"git push --force origin main",
-		"git push -f origin main",
-		"git reset --hard HEAD~3",
-		"git clean -fd",
-		"chmod 777 /tmp",
-		"chmod -R 755 /var",
-		"dd if=/dev/zero of=/dev/sda",
-		"RM -RF /tmp/foo",
-		"pip install requests",
-		"pip install --user requests",
-		"pip3 install flask",
-		"npm install --global prettier",
-		"npm install -g eslint",
-		"cargo install ripgrep",
-		"gem install rails",
-		"go install golang.org/x/tools/...",
-		"brew install jq",
-	}
-	for _, cmd := range dangerous {
-		assert.True(t, IsDangerousCommand(cmd), "expected dangerous: %q", cmd)
-	}
-
-	safe := []string{
-		"git push origin main",
-		"git status",
-		"npm test",
-		"go build ./...",
-		"mkdir -p /tmp/test",
-		"cat /etc/hostname",
-		"chmod 644 myfile.txt",
-		"ls -la",
-	}
-	for _, cmd := range safe {
-		assert.False(t, IsDangerousCommand(cmd), "expected safe: %q", cmd)
-	}
-}
-
-func TestExtractBashCommand(t *testing.T) {
-	t.Parallel()
-
-	assert.Equal(t, "echo hello", extractBashCommand(map[string]string{"command": "echo hello"}))
-	assert.Equal(t, "", extractBashCommand(nil))
-	assert.Equal(t, "", extractBashCommand(map[string]string{"other": "value"}))
-
-	type bashParams struct {
-		Command string `json:"command"`
-	}
-	assert.Equal(t, "git status", extractBashCommand(bashParams{Command: "git status"}))
 }

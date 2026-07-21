@@ -20,6 +20,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/classifier"
 	"github.com/charmbracelet/crush/internal/clipboard"
@@ -98,6 +99,14 @@ type App struct {
 // caller is responsible for constructing it (typically via
 // skills.NewManager + skills.DiscoverFromConfig).
 func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr *skills.Manager) (*App, error) {
+	// Initialize the classifier's tool category maps from the canonical
+	// lists. This bridges the import cycle between classifier and tools.
+	classifier.InitToolCategories(
+		tools.ReadOnlyToolNames(),
+		tools.InProjectWriteToolNames(),
+		tools.LowRiskToolNames(),
+	)
+
 	q := db.New(conn)
 	sessions := session.NewService(q, conn)
 	messages := message.NewService(q)

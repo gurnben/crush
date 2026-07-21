@@ -822,8 +822,17 @@ func resolveAllowedTools(allTools []string, disabledTools []string) []string {
 	return filterSlice(allTools, disabledTools, false)
 }
 
+// resolveReadOnlyTools filters tools to those that are read-only.
+// NOTE: This list must be kept in sync with
+// internal/agent/tools/tool_categories.go ReadOnlyToolNames(), which
+// is the canonical source of truth. A direct import is not possible
+// due to the tools → config import dependency.
 func resolveReadOnlyTools(tools []string) []string {
-	readOnlyTools := []string{"glob", "grep", "ls", "lsp_call_hierarchy", "lsp_definition", "lsp_symbols", "sourcegraph", "view"}
+	readOnlyTools := []string{
+		"glob", "grep", "ls",
+		"lsp_call_hierarchy", "lsp_definition", "lsp_symbols",
+		"sourcegraph", "view",
+	}
 	// filter to only include tools that are in allowedtools (include mode)
 	return filterSlice(tools, readOnlyTools, true)
 }
