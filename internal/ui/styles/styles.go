@@ -605,6 +605,7 @@ func (s *Styles) ChromaTheme() chroma.StyleEntries {
 		chroma.Error:               chromaStyle(rules.Chroma.Error),
 		chroma.Comment:             chromaStyle(rules.Chroma.Comment),
 		chroma.CommentPreproc:      chromaStyle(rules.Chroma.CommentPreproc),
+		chroma.CommentPreprocFile:  chromaStyle(rules.Chroma.Name),
 		chroma.Keyword:             chromaStyle(rules.Chroma.Keyword),
 		chroma.KeywordReserved:     chromaStyle(rules.Chroma.KeywordReserved),
 		chroma.KeywordNamespace:    chromaStyle(rules.Chroma.KeywordNamespace),
