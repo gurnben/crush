@@ -732,6 +732,9 @@ func TestMCPConfigEqualExhaustive(t *testing.T) {
 	// Fields intentionally excluded from the comparison.
 	excluded := map[string]bool{
 		"OAuthToken": true, // internally managed, refreshed out-of-band.
+		// Lazy decides which tools reach the model, not how the server is
+		// reached, so toggling it must never tear the connection down.
+		"Lazy": true,
 	}
 
 	typ := reflect.TypeOf(config.MCPConfig{})
