@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/crush/internal/client"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/logout"
+	"github.com/charmbracelet/crush/internal/oauth/antigravity"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 )
@@ -21,6 +22,11 @@ var providerDisplayNames = map[string]string{
 	"copilot": "GitHub Copilot",
 	"openai":  "ChatGPT",
 	"xai":     "Grok",
+	// The Google subscription reaches the same backend as the Antigravity
+	// CLI, so every spelling users reach for names one provider.
+	"gemini":      "Google AI Subscription",
+	"antigravity": "Google AI Subscription",
+	"gemini-sub":  "Google AI Subscription",
 }
 
 var logoutCmd = &cobra.Command{
@@ -53,6 +59,9 @@ crush logout grok
 		"chatgpt",
 		"grok",
 		"xai",
+		"gemini",
+		"antigravity",
+		"gemini-sub",
 	},
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -118,6 +127,8 @@ crush logout grok
 			return logoutOpenAI(c, ws.ID)
 		case "xai":
 			return logoutXAI(c, ws.ID)
+		case "gemini", "antigravity", "gemini-sub":
+			return logoutGemini(c, ws.ID)
 		default:
 			return fmt.Errorf("unknown platform: %s", provider)
 		}
@@ -171,6 +182,24 @@ func logoutOpenAI(c *client.Client, wsID string) error {
 	return nil
 }
 
+// logoutGemini clears a Google AI subscription: the OAuth token, the model
+// catalog it unlocked, and the access token mirrored into api_key.
+func logoutGemini(c *client.Client, wsID string) error {
+	ctx := getLogoutContext()
+	provider := antigravity.ProviderID
+
+	if err := cmp.Or(
+		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers."+provider+".oauth"),
+		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers."+provider+".models"),
+		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers."+provider+".api_key"),
+	); err != nil {
+		return err
+	}
+
+	fmt.Printf("Successfully logged out of %s.\n", providerDisplayNames["gemini"])
+	return nil
+}
+
 func logoutXAI(c *client.Client, wsID string) error {
 	ctx := getLogoutContext()
 
@@ -205,7 +234,7 @@ func pickLoggedInProvider(c *client.Client, wsID string) (string, bool, error) {
 		id   string
 		name string
 	}
-	for _, id := range []string{"hyper", "copilot", "openai", "xai"} {
+	for _, id := range []string{"hyper", "copilot", "openai", "xai", antigravity.ProviderID} {
 		if p, ok := cfg.Providers.Get(id); ok && p.OAuthToken != nil {
 			loggedIn = append(loggedIn, struct {
 				id   string
