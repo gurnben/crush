@@ -110,6 +110,12 @@ func servingProvider(providerCfg config.ProviderConfig, model catwalk.Model) str
 
 type Coordinator interface {
 	SetMainAgent(agentName string) error
+	// MainAgentName reports which agent currently serves the main turn;
+	// MainAgentNames lists the selectable ones in cycle order. Together
+	// they let a client read back the purpose axis it just changed. Without
+	// them the active agent is write-only and the UI can only guess it.
+	MainAgentName() string
+	MainAgentNames() []string
 	Run(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error)
 	// RunAccepted runs a call that was already accepted via
 	// BeginAccepted on the fire-and-forget dispatch path. The handle is
@@ -161,7 +167,10 @@ type coordinator struct {
 	mainAgent     SessionAgent
 	mainAgentName string
 	agents        map[string]SessionAgent
-	hookRunner    *hooks.Runner
+	// mainAgentNames is the selectable set in cycle order, so the UI can
+	// walk the purpose axis without hard-coding which agents exist.
+	mainAgentNames []string
+	hookRunner     *hooks.Runner
 
 	// models is shared by every agent; rebuildMu serializes rebuilds of it.
 	models    csync.Value[coordinatorModels]
@@ -283,6 +292,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 
 	c.mainAgent = agent
 	c.mainAgentName = config.AgentCoder
+	c.mainAgentNames = []string{config.AgentCoder, config.AgentPlan}
 	return c, nil
 }
 
@@ -312,6 +322,19 @@ func (c *coordinator) SetMainAgent(agentName string) error {
 	c.mainAgent = agent
 	c.mainAgentName = agentName
 	return nil
+}
+
+// MainAgentName implements Coordinator.
+func (c *coordinator) MainAgentName() string {
+	_, name := c.activeAgent()
+	return name
+}
+
+// MainAgentNames implements Coordinator.
+func (c *coordinator) MainAgentNames() []string {
+	c.agentMu.RLock()
+	defer c.agentMu.RUnlock()
+	return slices.Clone(c.mainAgentNames)
 }
 
 // Run implements Coordinator.
@@ -864,7 +887,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		SystemPrompt:         "",
 		IsSubAgent:           isSubAgent,
 		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
-		IsYolo:               c.permissions.SkipRequests(),
+		Permissions:          c.permissions,
 		Sessions:             c.sessions,
 		Messages:             c.messages,
 		Cfg:                  c.cfg,
