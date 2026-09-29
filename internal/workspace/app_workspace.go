@@ -250,7 +250,7 @@ func (w *AppWorkspace) AgentMainID() string {
 
 func (w *AppWorkspace) AgentMainCandidates() []string {
 	if w.app.AgentCoordinator == nil {
-		return nil
+		return DefaultMainAgents
 	}
 	return w.app.AgentCoordinator.MainAgentNames()
 }
@@ -292,14 +292,6 @@ func (w *AppWorkspace) PermissionDeny(perm permission.PermissionRequest) bool {
 	return w.app.Permissions.Deny(perm)
 }
 
-func (w *AppWorkspace) PermissionSkipRequests() bool {
-	return w.app.Permissions.SkipRequests()
-}
-
-func (w *AppWorkspace) PermissionSetSkipRequests(skip bool) {
-	w.app.Permissions.SetSkipRequests(skip)
-}
-
 // -- Host context --
 
 func (w *AppWorkspace) HostContext(_ context.Context) (proto.HostContext, error) {
@@ -307,16 +299,6 @@ func (w *AppWorkspace) HostContext(_ context.Context) (proto.HostContext, error)
 		return proto.HostContext{}, nil
 	}
 	return w.app.AgentCoordinator.HostContext(), nil
-}
-
-// PermissionAutoMode reports the runtime auto-mode state.
-func (w *AppWorkspace) PermissionAutoMode() bool {
-	return w.app.Permissions.AutoMode()
-}
-
-// PermissionSetAutoMode sets the runtime auto-mode state.
-func (w *AppWorkspace) PermissionSetAutoMode(enabled bool) {
-	w.app.Permissions.SetAutoMode(enabled)
 }
 
 // PermissionLevel reports the approval level in effect.
