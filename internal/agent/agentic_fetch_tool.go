@@ -187,6 +187,7 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				Permissions:          c.permissions,
 				Sessions:             c.sessions,
 				Messages:             c.messages,
+				Cfg:                  c.cfg,
 				Tools:                fetchTools,
 			})
 
