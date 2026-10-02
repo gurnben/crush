@@ -2179,12 +2179,25 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		}
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionSummarize:
+		// The palette entry collects emphasis first. The action handed back by
+		// the arguments dialog carries Args, so it runs straight through.
+		if len(msg.Arguments) > 0 && msg.Args == nil {
+			m.dialog.CloseFrontDialog()
+			m.dialog.OpenDialog(dialog.NewArguments(
+				m.com,
+				"Compact Session",
+				"Tell Crush what the checkpoint should emphasize, or leave it empty to summarize everything as usual.",
+				msg.Arguments,
+				msg,
+			))
+			break
+		}
 		if m.isAgentBusy() {
 			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before summarizing session..."))
 			break
 		}
 		cmds = append(cmds, func() tea.Msg {
-			err := m.com.Workspace.AgentSummarize(context.Background(), msg.SessionID)
+			err := m.com.Workspace.AgentSummarize(context.Background(), msg.SessionID, msg.Instructions)
 			if err != nil {
 				return util.ReportError(err)()
 			}
@@ -5888,6 +5901,15 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		return m.handleAWSSSOAuth(n.AWSSOCommand, n.AWSSOURL)
 	case notify.TypeAWSSSOAuthResult:
 		return m.handleAWSSSOAuthResult(n.Message)
+	case notify.TypeSummarizing:
+		// Compaction is quiet work with a visible result. Report what it did
+		// once it ends, so a long pause is not mistaken for a hang and a
+		// failed compaction is not silently ignored. The chat already spins
+		// while it runs, and the session update refreshes the context meter.
+		if !n.Done || n.Progress == "" {
+			return nil
+		}
+		return util.ReportInfo(n.Progress)
 	default:
 		return nil
 	}

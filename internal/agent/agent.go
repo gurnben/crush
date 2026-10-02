@@ -41,6 +41,7 @@ import (
 	"github.com/charmbracelet/crush/internal/compaction"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -175,7 +176,7 @@ type SessionAgent interface {
 	QueuedPrompts(sessionID string) int
 	QueuedPromptsList(sessionID string) []string
 	ClearQueue(sessionID string)
-	Summarize(context.Context, string, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error
+	Summarize(context.Context, string, string, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error
 	Model() Model
 	GenerateTitle(ctx context.Context, sessionID, userPrompt string)
 }
@@ -216,9 +217,10 @@ type sessionAgent struct {
 	// can change while an agent lives, and a copy taken at build time
 	// would keep acting on the level the user has since left behind.
 	// Nil only in tests and sub-agents that cannot raise permissions.
-	permissions permission.Service
-	notify      pubsub.Publisher[notify.Notification]
-	runComplete pubsub.Publisher[notify.RunComplete]
+	permissions     permission.Service
+	notify          pubsub.Publisher[notify.Notification]
+	compactionHooks func(event string) CompactionHookRunner
+	runComplete     pubsub.Publisher[notify.RunComplete]
 
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, *activeCancel]
@@ -280,6 +282,12 @@ type SessionAgentOptions struct {
 	Tools       []fantasy.AgentTool
 	Notify      pubsub.Publisher[notify.Notification]
 	RunComplete pubsub.Publisher[notify.RunComplete]
+
+	// CompactionHooks returns the runner for a compaction event, or nil when
+	// the user configured none for it. It is a function because each event has
+	// its own configured command list, and it is nil for sub-agents, which
+	// never compact.
+	CompactionHooks func(event string) CompactionHookRunner
 }
 
 func NewSessionAgent(
@@ -298,6 +306,7 @@ func NewSessionAgent(
 		tools:                csync.NewSliceFrom(opts.Tools),
 		permissions:          opts.Permissions,
 		notify:               opts.Notify,
+		compactionHooks:      opts.CompactionHooks,
 		runComplete:          opts.RunComplete,
 		messageQueue:         csync.NewMap[string, []SessionAgentCall](),
 		activeRequests:       csync.NewMap[string, *activeCancel](),
@@ -832,7 +841,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		a.publishRunComplete(ctx, call, complete)
 	}()
 
-	history, files := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages, call.Attachments...)
+	// Stale tool output is dropped from the request rather than from storage:
+	// it is the largest thing a long session carries, the least likely to
+	// still matter, and trivially re-derivable by re-running the call.
+	view, pruned := compaction.Prune(msgs, a.prunePolicy(int64(largeModel.CatwalkCfg.ContextWindow)))
+	if pruned > 0 {
+		slog.Debug("Pruned stale tool output from the request",
+			"session_id", call.SessionID, "tokens", pruned)
+	}
+	history, files := a.preparePrompt(view, largeModel.CatwalkCfg.SupportsImages, call.Attachments...)
 
 	startTime := time.Now()
 	a.eventPromptSent(call.SessionID)
@@ -1279,7 +1296,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 
 	if shouldSummarize {
 		a.activeRequests.Del(call.SessionID)
-		if summarizeErr := a.Summarize(genCtx, call.SessionID, call.ProviderOptions, call.OnAuthRefresh); summarizeErr != nil {
+		if summarizeErr := a.Summarize(compactionTriggerContext(genCtx), call.SessionID, "", call.ProviderOptions, call.OnAuthRefresh); summarizeErr != nil {
 			return nil, summarizeErr
 		}
 		// If the agent wasn't done...
@@ -1424,7 +1441,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	return a.Run(ctx, firstQueuedMessage)
 }
 
-func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fantasy.ProviderOptions, onAuthRefresh func(context.Context, *fantasy.ProviderError) error) error {
+func (a *sessionAgent) Summarize(ctx context.Context, sessionID, instructions string, opts fantasy.ProviderOptions, onAuthRefresh func(context.Context, *fantasy.ProviderError) error) error {
 	if a.IsSessionBusy(sessionID) {
 		return ErrSessionBusy
 	}
@@ -1450,7 +1467,13 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	// second time, and measure the cut against the live transcript ahead of
 	// it.
 	previousCheckpoint, body := splitCheckpoint(msgs)
-	cut := compaction.Plan(body, compaction.DefaultPolicy)
+
+	// Plan against what the model actually sees. Pruning has already trimmed
+	// stale tool output from every request, so sizing a tail from the unpruned
+	// transcript would budget for a session nobody receives. Indices are
+	// unaffected: pruning rewrites messages, it never removes them.
+	view, _ := compaction.Prune(body, a.prunePolicy(int64(largeModel.CatwalkCfg.ContextWindow)))
+	cut := compaction.Plan(view, a.compactionPolicy(int64(largeModel.CatwalkCfg.ContextWindow)))
 	region := body
 	if cut.Found {
 		// Keep the recent turns verbatim. The next model sees them as written
@@ -1461,8 +1484,49 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	if len(region) == 0 {
 		return nil
 	}
+	// A checkpoint wants the full text, because this is the last moment it is
+	// in hand. But a region larger than the request can carry is truncated by
+	// some servers rather than rejected, which would write a checkpoint that
+	// never saw most of what it replaced; when it cannot fit, summarize what
+	// the model was actually shown.
+	if limit := compaction.RegionLimit(int64(largeModel.CatwalkCfg.ContextWindow)); limit > 0 &&
+		compaction.EstimateAll(region) > limit {
+		slog.Debug("Summarizing the pruned view because the full region will not fit",
+			"session_id", sessionID,
+			"region_tokens", compaction.EstimateAll(region),
+			"limit", limit,
+		)
+		region = view[:len(region)]
+	}
+
+	detail := hooks.CompactionDetail{
+		Trigger:      compactionTrigger(ctx),
+		Instructions: instructions,
+		Messages:     len(region),
+		Tokens:       compaction.EstimateAll(region),
+	}
+	if result, ok := a.runCompactionHook(ctx, hooks.EventPreCompact, sessionID, detail); ok &&
+		result.Decision == hooks.DecisionDeny {
+		// Denying skips this compaction rather than cancelling anything the
+		// user asked for. Nothing is latched, so the next turn that needs the
+		// room asks again - which is right, because a hook usually objects to
+		// this compaction at this moment, not to compaction forever.
+		slog.Info("Compaction denied by hook",
+			"session_id", sessionID, "reason", result.Reason)
+		return nil
+	}
 
 	aiMsgs, _ := a.preparePrompt(region, largeModel.CatwalkCfg.SupportsImages)
+
+	// Compaction is a visible pause, and a failed one is worse than a silent
+	// one, so observers are told when it starts and - always, including on
+	// cancel and failure - when the session is usable again. Registered
+	// before the other defers so the closing event follows the flush.
+	a.publishSummarizing(sessionID, currentSession.Title, false, "Compacting the session")
+	outcome := "Compaction failed"
+	defer func() {
+		a.publishSummarizing(sessionID, currentSession.Title, true, outcome)
+	}()
 
 	genCtx, cancel := context.WithCancel(ctx)
 	ac := &activeCancel{cancel: cancel}
@@ -1503,10 +1567,32 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		transcriptPath = path
 	}
 
-	summaryPromptText := buildSummaryPrompt(currentSession.Todos, previousCheckpoint, transcriptPath)
+	summaryPromptText := buildSummaryPrompt(currentSession.Todos, instructions, previousCheckpoint, transcriptPath)
+
+	// The checkpoint request has to fit the window it is summarizing into.
+	// Left unset, the provider applies its own default, and a nearly-full
+	// session then fails as too long: the one failure compaction exists to
+	// prevent. The estimate omits tool definitions, so it runs a little
+	// optimistic rather than a little pessimistic.
+	checkpointTokens, tight := compaction.CheckpointOutputBudget(
+		int64(largeModel.CatwalkCfg.ContextWindow),
+		compaction.EstimateAll(region)+
+			compaction.Tokens(string(summaryPrompt))+
+			compaction.Tokens(systemPromptPrefix)+
+			compaction.Tokens(summaryPromptText),
+		largeModel.CatwalkCfg.DefaultMaxTokens,
+	)
+	if tight {
+		slog.Warn("Very little room left for a session checkpoint",
+			"session_id", sessionID,
+			"context_window", largeModel.CatwalkCfg.ContextWindow,
+			"max_output_tokens", checkpointTokens,
+		)
+	}
 
 	resp, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
 		Prompt:          summaryPromptText,
+		MaxOutputTokens: &checkpointTokens,
 		Messages:        aiMsgs,
 		Headers:         sessionHeaders(sessionID),
 		ProviderOptions: opts,
@@ -1544,6 +1630,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		isCancelErr := errors.Is(err, context.Canceled)
 		if isCancelErr {
 			// User cancelled summarize we need to remove the summary message.
+			outcome = "Compaction canceled"
 			deleteErr := a.messages.Delete(ctx, summaryMessage.ID)
 			return deleteErr
 		}
@@ -1606,6 +1693,12 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	_, err = a.sessions.Save(genCtx, currentSession)
 	if err != nil {
 		return err
+	}
+
+	outcome = fmt.Sprintf("Compacted %d messages, kept %d verbatim", len(region), cut.Kept)
+	a.eventSessionCompacted(sessionID, len(region), cut.Kept)
+	if _, ok := a.runCompactionHook(ctx, hooks.EventPostCompact, sessionID, detail); ok {
+		slog.Debug("Compaction hooks completed", "session_id", sessionID)
 	}
 
 	// Release the active request before processing queued messages so that
@@ -1932,6 +2025,104 @@ func splitCheckpoint(msgs []message.Message) (previous string, body []message.Me
 		return compaction.Body(msgs[0].Content().Text), msgs[1:]
 	}
 	return "", msgs
+}
+
+// publishSummarizing tells observers that a session is being compacted, and
+// again when it is not. Without the closing event a compaction that fails or
+// is canceled leaves observers showing "summarizing" indefinitely.
+func (a *sessionAgent) publishSummarizing(sessionID, title string, done bool, progress string) {
+	if a.notify == nil {
+		return
+	}
+	a.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+		SessionID:    sessionID,
+		SessionTitle: title,
+		Type:         notify.TypeSummarizing,
+		Done:         done,
+		Progress:     progress,
+	})
+}
+
+// CompactionHookRunner is the seam the agent needs from the user's compaction
+// hooks: a way to ask whether a compaction may happen.
+type CompactionHookRunner interface {
+	RunCompaction(ctx context.Context, eventName, sessionID string, detail hooks.CompactionDetail) (hooks.AggregateResult, error)
+}
+
+// compactionTriggerContext marks a compaction as machine-initiated, so a hook
+// can treat "the window filled up" differently from "the user asked".
+func compactionTriggerContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, compactionTriggerKey{}, true)
+}
+
+type compactionTriggerKey struct{}
+
+func compactionTrigger(ctx context.Context) string {
+	if ctx.Value(compactionTriggerKey{}) != nil {
+		return "auto"
+	}
+	return "manual"
+}
+
+// runCompactionHook fires one compaction event and reports whether anything
+// ran. A failing hook never blocks a compaction: only an explicit deny does.
+func (a *sessionAgent) runCompactionHook(ctx context.Context, event, sessionID string, detail hooks.CompactionDetail) (hooks.AggregateResult, bool) {
+	if a.compactionHooks == nil {
+		return hooks.AggregateResult{}, false
+	}
+	runner := a.compactionHooks(event)
+	if runner == nil {
+		return hooks.AggregateResult{}, false
+	}
+	result, err := runner.RunCompaction(ctx, event, sessionID, detail)
+	if err != nil {
+		slog.Warn("Compaction hook failed; continuing without it",
+			"event", event, "session_id", sessionID, "error", err)
+		return hooks.AggregateResult{}, false
+	}
+	return result, true
+}
+
+// compactionOptions returns the configured compaction options, or nil when
+// the agent has no config store.
+func (a *sessionAgent) compactionOptions() *config.CompactionOptions {
+	if a.cfg == nil {
+		return nil
+	}
+	cfg := a.cfg.Config()
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Options.Compaction
+}
+
+// compactionPolicy is the checkpoint policy in force for a model with the
+// given context window. The window is a caller argument rather than agent
+// state because an agent's model can change underneath it.
+func (a *sessionAgent) compactionPolicy(contextWindow int64) compaction.Policy {
+	var configured int64
+	if opts := a.compactionOptions(); opts != nil {
+		configured = int64(opts.TailTokens)
+	}
+	p := compaction.DefaultPolicy
+	p.KeepRecentTokens = compaction.TailBudget(contextWindow, configured)
+	return p
+}
+
+// prunePolicy is the tool-output pruning policy in force for a model with the
+// given context window. Pruning is enabled unless the config says otherwise,
+// matching other tri-state options.
+func (a *sessionAgent) prunePolicy(contextWindow int64) compaction.PrunePolicy {
+	var configuredTail int64
+	if opts := a.compactionOptions(); opts != nil {
+		configuredTail = int64(opts.TailTokens)
+	}
+
+	p := compaction.PrunePolicyForWindow(contextWindow, configuredTail)
+	if opts := a.compactionOptions(); opts != nil && opts.PruneToolResults != nil {
+		p.Disabled = !*opts.PruneToolResults
+	}
+	return p
 }
 
 // compactionTranscriptDir is where displaced transcript regions are kept, or
@@ -2513,9 +2704,17 @@ func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Mes
 }
 
 // buildSummaryPrompt constructs the prompt text for session summarization.
-func buildSummaryPrompt(todos []session.Todo, previousCheckpoint, transcriptPath string) string {
+func buildSummaryPrompt(todos []session.Todo, instructions, previousCheckpoint, transcriptPath string) string {
 	var sb strings.Builder
 	sb.WriteString("Write the checkpoint for the conversation above.")
+
+	if instructions != "" {
+		sb.WriteString("\n\n<instructions>\n")
+		sb.WriteString(instructions)
+		sb.WriteString("\n</instructions>\n\n")
+		sb.WriteString("The user asked that this checkpoint emphasize the above. ")
+		sb.WriteString("It changes what to foreground, not what to preserve: every constraint the user stated and every rejected approach still have to survive. ")
+	}
 
 	if previousCheckpoint != "" {
 		sb.WriteString("\n\n<previous_checkpoint>\n")

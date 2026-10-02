@@ -253,11 +253,11 @@ func (w *AppWorkspace) AgentMainCandidates() []string {
 	return w.app.AgentCoordinator.MainAgentNames()
 }
 
-func (w *AppWorkspace) AgentSummarize(ctx context.Context, sessionID string) error {
+func (w *AppWorkspace) AgentSummarize(ctx context.Context, sessionID, instructions string) error {
 	if w.app.AgentCoordinator == nil {
 		return errors.New("agent coordinator not initialized")
 	}
-	return w.app.AgentCoordinator.Summarize(ctx, sessionID)
+	return w.app.AgentCoordinator.Summarize(ctx, sessionID, instructions)
 }
 
 func (w *AppWorkspace) UpdateAgentModel(ctx context.Context) error {

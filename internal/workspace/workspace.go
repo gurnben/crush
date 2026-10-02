@@ -176,7 +176,7 @@ type Workspace interface {
 	// free to disagree about what mode they are in.
 	AgentMainID() string
 	AgentMainCandidates() []string
-	AgentSummarize(ctx context.Context, sessionID string) error
+	AgentSummarize(ctx context.Context, sessionID, instructions string) error
 	UpdateAgentModel(ctx context.Context) error
 	InitCoderAgent(ctx context.Context) error
 	InitCoderAgentNonInteractive(ctx context.Context) error
