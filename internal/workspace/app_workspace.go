@@ -253,6 +253,13 @@ func (w *AppWorkspace) AgentMainCandidates() []string {
 	return w.app.AgentCoordinator.MainAgentNames()
 }
 
+func (w *AppWorkspace) AgentRestoreSummarize(ctx context.Context, sessionID string) error {
+	if w.app.AgentCoordinator == nil {
+		return errors.New("agent coordinator not initialized")
+	}
+	return w.app.AgentCoordinator.RestoreSummarize(ctx, sessionID)
+}
+
 func (w *AppWorkspace) AgentSummarize(ctx context.Context, sessionID, instructions string) error {
 	if w.app.AgentCoordinator == nil {
 		return errors.New("agent coordinator not initialized")

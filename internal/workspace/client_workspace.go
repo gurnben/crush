@@ -346,6 +346,10 @@ func (w *ClientWorkspace) AgentMainCandidates() []string {
 	return info.Selectable
 }
 
+func (w *ClientWorkspace) AgentRestoreSummarize(ctx context.Context, sessionID string) error {
+	return w.client.AgentRestoreSummarizeSession(ctx, w.workspaceID(), sessionID)
+}
+
 func (w *ClientWorkspace) AgentSummarize(ctx context.Context, sessionID, instructions string) error {
 	return w.client.AgentSummarizeSession(ctx, w.workspaceID(), sessionID, instructions)
 }
