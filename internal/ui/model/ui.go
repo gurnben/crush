@@ -3897,6 +3897,7 @@ func (m *UI) ShortHelp() []key.Binding {
 			binds,
 			tab,
 			k.ShiftTab,
+			k.CyclePermissionLevel,
 			commands,
 			k.Models,
 		)
@@ -3938,6 +3939,7 @@ func (m *UI) ShortHelp() []key.Binding {
 			k.Tab,
 			commands,
 			k.ShiftTab,
+			k.CyclePermissionLevel,
 			k.Models,
 			k.Editor.Newline,
 		)
