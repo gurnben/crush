@@ -37,6 +37,7 @@ import (
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth"
+	"github.com/charmbracelet/crush/internal/oauth/antigravity"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	openaioauth "github.com/charmbracelet/crush/internal/oauth/openai"
 	"github.com/charmbracelet/crush/internal/permission"
@@ -454,7 +455,7 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 	// retry means the user doesn't need to re-authenticate. AWS SSO is
 	// handled transparently inside OnAuthRefresh, so it needs no post-run
 	// notification here.
-	if originalErr != nil && isUnauthorized(originalErr) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
+	if originalErr != nil && isUnauthorized(originalErr) && c.notify != nil && notifiesOnRevokedToken(model.ModelCfg.Provider) {
 		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
 			Type:       notify.TypeReAuthenticate,
 			ProviderID: model.ModelCfg.Provider,
@@ -1322,13 +1323,33 @@ func (c *coordinator) buildBedrockProvider(apiKey string, headers map[string]str
 	return bedrock.New(opts...)
 }
 
-func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[string]string) (fantasy.Provider, error) {
+func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[string]string, token *oauth.Token) (fantasy.Provider, error) {
+	// A subscription login carries no API key — the credential is the OAuth
+	// token, and the gateway is a different service from the one a key
+	// addresses. The SDK refuses to build a client without a key at all, so
+	// a placeholder satisfies the presence check while the transport supplies
+	// the real authorization header.
+	if token != nil && apiKey == "" {
+		apiKey = antigravity.KeyPlaceholder
+	}
 	opts := []google.Option{
 		google.WithBaseURL(baseURL),
 		google.WithGeminiAPIKey(apiKey),
 	}
+	var httpClient *http.Client
 	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
+		httpClient = log.NewHTTPClient()
+	}
+	if token != nil {
+		if httpClient == nil {
+			httpClient = &http.Client{}
+		}
+		httpClient.Transport = &antigravity.Transport{
+			Base:  httpClient.Transport,
+			Token: token,
+		}
+	}
+	if httpClient != nil {
 		opts = append(opts, google.WithHTTPClient(httpClient))
 	}
 	if len(headers) > 0 {
@@ -1353,6 +1374,18 @@ func (c *coordinator) buildGoogleVertexProvider(headers map[string]string, optio
 	opts = append(opts, google.WithVertex(project, location))
 
 	return google.New(opts...)
+}
+
+// notifiesOnRevokedToken reports whether a provider should ask the user to
+// sign in again once its OAuth token stops working. Providers that
+// authenticate with a login rather than a key the user can paste in have no
+// recovery path besides re-authenticating.
+func notifiesOnRevokedToken(providerID string) bool {
+	switch providerID {
+	case hyper.Name, antigravity.ProviderID:
+		return true
+	}
+	return false
 }
 
 func (c *coordinator) isAnthropicThinking(model config.SelectedModel) bool {
@@ -1414,7 +1447,10 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 	case bedrock.Name:
 		return c.buildBedrockProvider(apiKey, headers, providerCfg.ID)
 	case google.Name:
-		return c.buildGoogleProvider(baseURL, apiKey, headers)
+		// A Google subscription reaches the same API through an internal
+		// gateway with its own request envelope, which the token-bearing
+		// transport handles.
+		return c.buildGoogleProvider(baseURL, apiKey, headers, providerCfg.OAuthToken)
 	case "google-vertex":
 		return c.buildGoogleVertexProvider(headers, providerCfg.ExtraParams)
 	case openaicompat.Name, hyper.Name:
@@ -1490,6 +1526,10 @@ func (c *coordinator) UpdateModels(ctx context.Context) error {
 	// guards make this a no-op once a catalog exists.
 	c.cfg.RefetchOpenAIChatGPTModels(ctx)
 	c.cfg.RefetchGrokModels(ctx)
+	// Same reasoning for a Google subscription: its model list is specific
+	// to the account, so a sign-in that predated the fetch or whose fetch
+	// failed leaves only the built-in placeholder list.
+	c.cfg.RefetchGeminiSubscriptionModels(ctx)
 
 	agent, name := c.activeAgent()
 	return c.updateAgentModels(ctx, agent, name)
@@ -1749,7 +1789,7 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 	result, err := run()
 	// Notify only if still unauthorized after retry. AWS SSO is handled
 	// transparently inside OnAuthRefresh, so it needs no post-run notice.
-	if err != nil && isUnauthorized(err) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
+	if err != nil && isUnauthorized(err) && c.notify != nil && notifiesOnRevokedToken(model.ModelCfg.Provider) {
 		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
 			Type:       notify.TypeReAuthenticate,
 			ProviderID: model.ModelCfg.Provider,
