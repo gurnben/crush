@@ -17,9 +17,9 @@ forward.
 - Hooks are Claude Code-compatible
 - Crush ships with a builtin `crush-hook` skill write, edit, and configure
   hooks; just tell Crush how to configure Crush
-- Crush supports three hook events: `PreToolUse`, `PrePermission`, and
-  `PermissionDenied`, with plans to support the full gamut; please let us know
-  which hooks you'd like to see next
+- Crush supports `PreToolUse`, `PrePermission`, `PermissionDenied`, plus
+  `PreCompact`/`PostCompact` around session compaction, with plans to support
+  the full gamut; please let us know which hooks you'd like to see next
 - Hooks run in parallel for speed, but their results compose in config order
   for determinism
 
@@ -280,6 +280,42 @@ Example — log every denial:
   }
 }
 ```
+
+### PreCompact and PostCompact
+
+`PreCompact` fires before a session is compacted, once the region a checkpoint
+is about to replace is known. `PostCompact` fires after the checkpoint has been
+written and the session saved.
+
+```jsonc
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        // Keep a record of every checkpoint this workspace writes.
+        "command": "./log-compaction.sh"
+      }
+    ]
+  }
+}
+```
+
+**Decisions**: deny skips this compaction, and halt stops the turn. Nothing
+else a hook can do affects a compaction, because there is no tool input to
+rewrite. PostCompact runs after the fact, so its decision is recorded rather
+than enforced.
+
+**Matchers** are about tool names, which compaction has none of, so leave
+`matcher` off. Every hook configured for the event runs.
+
+**Trigger**: the payload's `trigger` field is `"auto"` when the window filled up
+and `"manual"` when the user asked for it, so a hook that only ever wants to
+object to surprise compaction can check that first. A denial is not latched:
+the next turn that needs the room asks again.
+
+Instead of `tool_name` and `tool_input`, a compaction hook reads `trigger`,
+`instructions` (the emphasis the user supplied, if any), `messages` and `tokens`
+describing what the checkpoint stands in for.
 
 ## Building Hooks
 

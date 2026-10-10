@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/workspace"
@@ -18,6 +19,17 @@ type lazyPaletteWorkspace struct {
 }
 
 func (w *lazyPaletteWorkspace) Config() *config.Config { return w.cfg }
+
+// The palette also draws the approval and mode axes, so the mock answers those
+// too: a bare palette asks the workspace for everything it displays.
+func (w *lazyPaletteWorkspace) PermissionLevel() permission.Level {
+	return permission.LevelPrompt
+}
+func (w *lazyPaletteWorkspace) PermissionSetLevel(permission.Level) {}
+func (w *lazyPaletteWorkspace) AgentMainID() string                 { return config.AgentCoder }
+func (w *lazyPaletteWorkspace) AgentMainCandidates() []string {
+	return []string{config.AgentCoder}
+}
 
 func newLazyPalette(t *testing.T) *Commands {
 	t.Helper()

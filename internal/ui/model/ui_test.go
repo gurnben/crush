@@ -137,6 +137,12 @@ type testWorkspace struct {
 	mainAgents   []string
 	runHidden    []bool
 	compactCalls []bool
+
+	// Calls the checkpoint handoff drives, recorded so the tests can assert
+	// which workspace method each answer reaches.
+	previewCalls []string
+	confirmCalls []string
+	discardCalls []string
 }
 
 func (w *testWorkspace) Config() *config.Config {
@@ -932,4 +938,13 @@ func TestAutoModePlaceholder(t *testing.T) {
 	u.setPermissionLevel(permission.LevelBypass)
 	u.updatePlaceholder()
 	require.Equal(t, "Go crazy", u.textarea.Placeholder)
+
+	// A compaction in flight outranks the posture: the note is about this turn,
+	// and the user needs to know the turn is being summarized more than they
+	// need reminding which level is set.
+	u.setPermissionLevel(permission.LevelAuto)
+	u.summarizingNote = "Compacting session…"
+	u.summarizingNoteSession = u.session.ID
+	u.updatePlaceholder()
+	require.Equal(t, "Compacting session…", u.textarea.Placeholder)
 }

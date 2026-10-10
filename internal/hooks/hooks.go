@@ -23,6 +23,13 @@ const (
 	// It carries the permission request payload. Fire-and-forget: the
 	// hook does not block the denial.
 	EventPermissionDenied = "PermissionDenied"
+	// EventPreCompact fires before a session is compacted, with the region a
+	// checkpoint is about to replace. Denying it skips the compaction.
+	EventPreCompact = "PreCompact"
+	// EventPostCompact fires once a checkpoint has been written and the
+	// session saved. Its decision is recorded, not enforced: the compaction
+	// has already happened.
+	EventPostCompact = "PostCompact"
 )
 
 // HaltExitCode is the exit code that halts the whole turn. 2 blocks the
