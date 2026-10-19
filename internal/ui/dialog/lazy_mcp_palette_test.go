@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/workspace"
@@ -18,6 +19,19 @@ type lazyPaletteWorkspace struct {
 }
 
 func (w *lazyPaletteWorkspace) Config() *config.Config { return w.cfg }
+
+// The palette builds its approval and purpose rows from the workspace, so the
+// embedded nil interface would panic before the MCP rows this test inspects.
+// Answer with the defaults: asking every time, and the standard pair of agents.
+func (w *lazyPaletteWorkspace) PermissionLevel() permission.Level {
+	return permission.LevelPrompt
+}
+
+func (w *lazyPaletteWorkspace) AgentMainID() string { return config.AgentCoder }
+
+func (w *lazyPaletteWorkspace) AgentMainCandidates() []string {
+	return workspace.DefaultMainAgents
+}
 
 func newLazyPalette(t *testing.T) *Commands {
 	t.Helper()
