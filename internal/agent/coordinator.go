@@ -2080,9 +2080,16 @@ func (c *coordinator) refreshApiKeyTemplate(ctx context.Context, providerCfg con
 }
 
 // askToSignInAgain asks the user to sign in again when an OAuth credential
-// is still refused after the refresh-and-retry.
+// is still refused after the refresh-and-retry. The model snapshot's OAuth
+// flag covers a credential loaded at build time; the config lookup keeps the
+// notice alive for providers that declare a login but have no token in this
+// session's snapshot (a plugin provider signed out mid-session, or hyper
+// reached with a plain API key).
 func (c *coordinator) askToSignInAgain(err error, model Model) {
-	if err == nil || !isUnauthorized(err) || c.notify == nil || !model.OAuth {
+	if err == nil || !isUnauthorized(err) || c.notify == nil {
+		return
+	}
+	if !model.OAuth && !c.notifiesOnRevokedToken(model.ModelCfg.Provider) {
 		return
 	}
 	c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
