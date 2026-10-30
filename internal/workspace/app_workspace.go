@@ -242,6 +242,20 @@ func (w *AppWorkspace) AgentSetMain(agentID string) error {
 	return w.app.AgentCoordinator.SetMainAgent(agentID)
 }
 
+func (w *AppWorkspace) AgentMainID() string {
+	if w.app.AgentCoordinator == nil {
+		return ""
+	}
+	return w.app.AgentCoordinator.MainAgentName()
+}
+
+func (w *AppWorkspace) AgentMainCandidates() []string {
+	if w.app.AgentCoordinator == nil {
+		return DefaultMainAgents
+	}
+	return w.app.AgentCoordinator.MainAgentNames()
+}
+
 func (w *AppWorkspace) AgentSummarizePreview(ctx context.Context, sessionID, instructions string) (compaction.Preview, error) {
 	if w.app.AgentCoordinator == nil {
 		return compaction.Preview{}, errors.New("agent coordinator not initialized")
@@ -307,14 +321,6 @@ func (w *AppWorkspace) PermissionDeny(perm permission.PermissionRequest) bool {
 	return w.app.Permissions.Deny(perm)
 }
 
-func (w *AppWorkspace) PermissionSkipRequests() bool {
-	return w.app.Permissions.SkipRequests()
-}
-
-func (w *AppWorkspace) PermissionSetSkipRequests(skip bool) {
-	w.app.Permissions.SetSkipRequests(skip)
-}
-
 // -- Host context --
 
 func (w *AppWorkspace) HostContext(_ context.Context) (proto.HostContext, error) {
@@ -322,6 +328,16 @@ func (w *AppWorkspace) HostContext(_ context.Context) (proto.HostContext, error)
 		return proto.HostContext{}, nil
 	}
 	return w.app.AgentCoordinator.HostContext(), nil
+}
+
+// PermissionLevel reports the approval level in effect.
+func (w *AppWorkspace) PermissionLevel() permission.Level {
+	return w.app.Permissions.Level()
+}
+
+// PermissionSetLevel sets the approval level.
+func (w *AppWorkspace) PermissionSetLevel(level permission.Level) {
+	w.app.Permissions.SetLevel(level)
 }
 
 // -- Questions --

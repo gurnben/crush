@@ -44,6 +44,7 @@ import (
 	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/ledger"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
@@ -229,9 +230,14 @@ type sessionAgent struct {
 	cfg                  *config.ConfigStore
 	disableAutoSummarize bool
 	isYolo               bool
-	notify               pubsub.Publisher[notify.Notification]
-	runComplete          pubsub.Publisher[notify.RunComplete]
-	hooks                *hooks.Runner
+	// permissions is read per use, never snapshotted: the approval level
+	// can change while an agent lives, and a copy taken at build time
+	// would keep acting on the level the user has since left behind.
+	// Nil only in tests and sub-agents that cannot raise permissions.
+	permissions permission.Service
+	notify      pubsub.Publisher[notify.Notification]
+	runComplete pubsub.Publisher[notify.RunComplete]
+	hooks       *hooks.Runner
 	// ledger is the session memory store; nil when observation is off.
 	ledger        ledger.Service
 	observeMemory bool
@@ -289,8 +295,11 @@ type SessionAgentOptions struct {
 	IsSubAgent           bool
 	DisableAutoSummarize bool
 	IsYolo               bool
-	Sessions             session.Service
-	Messages             message.Service
+	// Permissions is the workspace permission service, read live for the
+	// current approval level. Nil leaves the agent at LevelPrompt.
+	Permissions permission.Service
+	Sessions    session.Service
+	Messages    message.Service
 	// Ledger persists session memory for the observer and the renderer. Nil
 	// leaves observation off entirely, which is the default: this feature is
 	// opt-in until it has measured well enough to trust.
@@ -321,7 +330,7 @@ func NewSessionAgent(
 		cfg:                  opts.Cfg,
 		disableAutoSummarize: opts.DisableAutoSummarize,
 		tools:                csync.NewSliceFrom(opts.Tools),
-		isYolo:               opts.IsYolo,
+		permissions:          opts.Permissions,
 		notify:               opts.Notify,
 		runComplete:          opts.RunComplete,
 		hooks:                opts.Hooks,
@@ -334,6 +343,16 @@ func NewSessionAgent(
 		acceptedRuns:         csync.NewMap[string, int](),
 		cancelMark:           csync.NewMap[string, uint64](),
 	}
+}
+
+// permissionLevel reports the approval level the workspace is at right
+// now. An agent without a permission service cannot be raised above
+// prompting, which is the safe reading.
+func (a *sessionAgent) permissionLevel() permission.Level {
+	if a.permissions == nil {
+		return permission.LevelPrompt
+	}
+	return a.permissions.Level()
 }
 
 // AcceptedRun owns exactly one accept reservation taken by
@@ -1083,6 +1102,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		},
 		OnToolResult: func(result fantasy.ToolResultContent) error {
 			toolResult := a.convertToToolResult(result)
+			// Escalation notes are attached to the ToolResponse itself
+			// (see notedTool) so the model sees them in the in-flight
+			// conversation; the note arrives here as part of the content.
 			if _, ok := sanitizedToolCalls.Get(result.ToolCallID); ok {
 				toolResult.Content = "Tool call failed: arguments were not valid JSON. Please check your tool call format and try again."
 				toolResult.IsError = true
