@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/workspace"
@@ -18,6 +19,12 @@ type lazyPaletteWorkspace struct {
 }
 
 func (w *lazyPaletteWorkspace) Config() *config.Config { return w.cfg }
+
+// The approval and purpose rows read these from the workspace on every
+// palette build, so the stub has to answer them too.
+func (w *lazyPaletteWorkspace) PermissionLevel() permission.Level { return permission.LevelPrompt }
+func (w *lazyPaletteWorkspace) AgentMainID() string               { return "coder" }
+func (w *lazyPaletteWorkspace) AgentMainCandidates() []string     { return []string{"coder"} }
 
 func newLazyPalette(t *testing.T) *Commands {
 	t.Helper()
