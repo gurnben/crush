@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -85,16 +86,23 @@ type SessionAgentCall struct {
 	RunID             string
 	Channel           string
 	HiddenUserMessage bool
-	Prompt            string
-	ProviderOptions   fantasy.ProviderOptions
-	Attachments       []message.Attachment
-	MaxOutputTokens   int64
-	Temperature       *float64
-	TopP              *float64
-	TopK              *int64
-	FrequencyPenalty  *float64
-	PresencePenalty   *float64
-	NonInteractive    bool
+	// QueueOnly delivers the call only into an active turn; on an idle
+	// session Run returns ErrSessionIdle instead of starting one.
+	QueueOnly bool
+	Prompt    string
+	// Saved is a user message already in the transcript that this call
+	// delivers, so no new one is written. Prompt is still what the model
+	// reads for it.
+	Saved            *message.Message
+	ProviderOptions  fantasy.ProviderOptions
+	Attachments      []message.Attachment
+	MaxOutputTokens  int64
+	Temperature      *float64
+	TopP             *float64
+	TopK             *int64
+	FrequencyPenalty *float64
+	PresencePenalty  *float64
+	NonInteractive   bool
 
 	// HostContext is what the host application had in view when the
 	// prompt was sent. The model sees it with this prompt only; it is
@@ -169,6 +177,9 @@ func filterToolsForChannel(agentTools []fantasy.AgentTool, channel string, state
 	}
 	return filtered
 }
+
+// ErrSessionIdle is returned for a QueueOnly call when no turn is active.
+var ErrSessionIdle = errors.New("session is idle")
 
 type SessionAgent interface {
 	Run(context.Context, SessionAgentCall) (*fantasy.AgentResult, error)
@@ -468,6 +479,9 @@ func (a *sessionAgent) enqueueCall(call SessionAgentCall) {
 	}
 	queued.OnComplete = nil
 	queued.Accepted = nil
+	// Once queued the call is accepted: if no step folds it in, it runs as
+	// its own turn rather than being refused as idle.
+	queued.QueueOnly = false
 	existing = append(existing, queued)
 	a.messageQueue.Set(call.SessionID, existing)
 }
@@ -748,6 +762,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		return nil, nil
 	}
 
+	if call.QueueOnly {
+		if call.Accepted != nil {
+			call.Accepted.Close()
+		}
+		sessMu.Unlock()
+		return nil, ErrSessionIdle
+	}
+
 	// Idle: become the active run. Register the cancel func before dropping
 	// the lock so a Cancel that arrives between here and assistant creation
 	// is not lost.
@@ -861,6 +883,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	msgs, err := a.getSessionMessages(ctx, currentSession)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session messages: %w", err)
+	}
+	if call.Saved != nil {
+		// The saved message goes in as this turn's prompt, not as history.
+		msgs = slices.DeleteFunc(msgs, func(m message.Message) bool { return m.ID == call.Saved.ID })
 	}
 
 	// Generate title from the first real (non-shell) user prompt.
@@ -1316,6 +1342,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		case len(currentAssistant.ToolCalls()) > 0:
 			existing, _ := a.messageQueue.Get(call.SessionID)
 			call.Prompt = fmt.Sprintf("The previous session was interrupted because it got too long, the initial user request was: `%s`", call.Prompt)
+			// The rewritten prompt is a new message, not the saved one.
+			call.Saved = nil
 			a.messageQueue.Set(call.SessionID, append(existing, call))
 			continued = true
 		}
@@ -1911,6 +1939,9 @@ func sessionHeaders(sessionID string) map[string]string {
 }
 
 func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentCall) (message.Message, error) {
+	if call.Saved != nil {
+		return *call.Saved, nil
+	}
 	parts := []message.ContentPart{message.TextContent{Text: call.Prompt, Hidden: call.HiddenUserMessage}}
 	var attachmentParts []message.ContentPart
 	for _, attachment := range call.Attachments {
@@ -2037,7 +2068,7 @@ If not, please feel free to ignore. Again do not mention this message to the use
 
 // filterDisabledMCPTools removes tools from MCP servers disabled via the
 // "Toggle MCPs" dialog. The override set is repository-scoped and shared
-// by every session in the repository, including sub-agent sessions.
+// by every session in the repository, including subagent sessions.
 // Connections are process-global and left untouched; only the tool list
 // changes.
 func (a *sessionAgent) filterDisabledMCPTools(ctx context.Context, toolList []fantasy.AgentTool) []fantasy.AgentTool {

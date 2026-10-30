@@ -200,7 +200,7 @@ func TestRunSubAgent(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.True(t, resp.IsError)
-		assert.Equal(t, "Sub-agent completed but produced no text output.", resp.Content)
+		assert.Equal(t, "Subagent completed but produced no text output.", resp.Content)
 	})
 
 	t.Run("empty result returns error response", func(t *testing.T) {
@@ -224,7 +224,7 @@ func TestRunSubAgent(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.True(t, resp.IsError)
-		assert.Equal(t, "Sub-agent completed but produced no text output.", resp.Content)
+		assert.Equal(t, "Subagent completed but produced no text output.", resp.Content)
 	})
 
 	t.Run("ModelCfg.MaxTokens overrides default", func(t *testing.T) {
