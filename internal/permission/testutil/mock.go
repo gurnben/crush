@@ -41,6 +41,8 @@ func (m *MockPermissionService) SetPermissionHooks(hooks permission.PermissionHo
 
 func (m *MockPermissionService) SetAutoMode(enabled bool) {}
 
+func (m *MockPermissionService) SeedAutoMode(configEnabled bool) {}
+
 func (m *MockPermissionService) AutoMode() bool { return false }
 
 func (m *MockPermissionService) DenialReason(toolCallID string) string { return "" }

@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"image"
 	"testing"
 
@@ -284,6 +285,11 @@ type testWorkspace struct {
 	level      permission.Level
 	mainAgent  string
 	mainAgents []string
+
+	// failLevelSet / failModeSet inject write failures so tests can pin
+	// how a level or mode change reports an undeliverable write.
+	failLevelSet error
+	failModeSet  error
 }
 
 func (w *testWorkspace) Config() *config.Config {
@@ -306,7 +312,13 @@ func (w *testWorkspace) UpdateAgentModel(context.Context) error {
 
 func (w *testWorkspace) PermissionLevel() permission.Level { return w.level }
 
-func (w *testWorkspace) PermissionSetLevel(level permission.Level) { w.level = level }
+func (w *testWorkspace) PermissionSetLevel(level permission.Level) error {
+	if w.failLevelSet != nil {
+		return w.failLevelSet
+	}
+	w.level = level
+	return nil
+}
 
 func (w *testWorkspace) AgentMainID() string {
 	if w.mainAgent == "" {
@@ -326,8 +338,12 @@ func (w *testWorkspace) PermissionMode() permission.PermissionMode {
 	return w.permMode
 }
 
-func (w *testWorkspace) PermissionSetMode(mode permission.PermissionMode) {
+func (w *testWorkspace) PermissionSetMode(mode permission.PermissionMode) error {
+	if w.failModeSet != nil {
+		return w.failModeSet
+	}
 	w.permMode = mode
+	return nil
 }
 
 func (w *testWorkspace) AgentIsReady() bool {
@@ -405,7 +421,9 @@ func TestCyclePermissionLevelWalksLevels(t *testing.T) {
 	u.purpose = config.AgentPlan
 
 	for _, want := range []permission.Level{permission.LevelAuto, permission.LevelBypass, permission.LevelPrompt} {
-		require.Equal(t, want, u.cyclePermissionLevel())
+		got, err := u.cyclePermissionLevel()
+		require.NoError(t, err)
+		require.Equal(t, want, got)
 		require.Equal(t, want, ws.level)
 	}
 	require.Equal(t, config.AgentPlan, u.purpose,
@@ -439,16 +457,20 @@ func newPlanUI(t *testing.T, sessionID string) (*UI, *testWorkspace) {
 	return u, ws
 }
 
-// seedYolo puts the workspace and the UI's memoized permission mode in the
-// same state the running UI keeps them in: every write goes through
-// setPermissionMode, so the cache never trails the workspace.
+// seedYolo puts the workspace and the UI's memoized permission state in
+// the same state the running UI keeps them in: the yolo toggle is a level
+// write that the caches track on both axes.
 func seedYolo(u *UI, ws *testWorkspace, on bool) {
+	level := permission.LevelPrompt
 	mode := permission.PermissionModeNormal
 	if on {
+		level = permission.LevelBypass
 		mode = permission.PermissionModeYolo
 	}
-	ws.PermissionSetMode(mode)
+	_ = ws.PermissionSetMode(mode)
 	u.permModeCache.set(mode)
+	ws.level = level
+	u.levelCache.set(level)
 }
 
 // applyPurposeSwitchMsg runs a setPurpose command to completion the way the
@@ -815,6 +837,44 @@ func TestCyclePurpose_BlockedWhileAgentBusy(t *testing.T) {
 	require.Equal(t, util.InfoTypeWarn, info.Type)
 }
 
+// TestCyclePurpose_BlockedWhileSessionBusy covers the window the
+// agent-wide flag cannot see: the flag follows the current main agent,
+// so right after a switch it reads idle while the run still serves the
+// old agent. The session-scoped probe must block the cycle anyway.
+func TestCyclePurpose_BlockedWhileSessionBusy(t *testing.T) {
+	t.Parallel()
+	u, ws := newPlanUI(t, "sess-1")
+	ws.agentReady = true
+	u.probedSession = "sess-1"
+	u.probedSessionBusy = true
+
+	msg := u.cyclePurpose()()
+	require.Equal(t, config.AgentPlan, u.purpose)
+	require.Empty(t, ws.setMainCalledWith)
+	info, ok := msg.(util.InfoMsg)
+	require.True(t, ok)
+	require.Equal(t, util.InfoTypeWarn, info.Type)
+}
+
+// TestPlanHandoffConfirm_NoSwitchWhenPurposeAlreadyCoder pins the nil-cmd
+// fix: Shift+Tab can leave the handoff open after switching to the coder,
+// and confirming then must not wrap a nil command (a panic) but simply
+// settle the pending plan.
+func TestPlanHandoffConfirm_NoSwitchWhenPurposeAlreadyCoder(t *testing.T) {
+	t.Parallel()
+	u, ws := newPlanUI(t, "sess-1")
+	u.openPlanHandoff()
+	inline, ok := u.activeInline.(*dialog.PlanHandoffInline)
+	require.True(t, ok)
+	u.purpose = config.AgentCoder
+	ws.setMainCalledWith = ""
+
+	cmd := inline.OnConfirm(false)
+	require.Nil(t, cmd)
+	require.Empty(t, ws.setMainCalledWith)
+	require.Empty(t, u.planReadySessionID, "confirming still settles the pending plan")
+}
+
 func TestSetPurpose_TracksModeSwitching(t *testing.T) {
 	t.Parallel()
 	u, _ := newPlanUI(t, "sess-1")
@@ -938,7 +998,8 @@ func TestPlanHandoffExplicitPermissionMode(t *testing.T) {
 		u.openPlanHandoff()
 		inline := u.activeInline.(*dialog.PlanHandoffInline)
 		cmd := inline.OnConfirm(bypass)
-		require.Equal(t, bypass, ws.permMode != permission.PermissionModeNormal)
+		require.Equal(t, bypass, ws.level == permission.LevelBypass,
+			"confirming the handoff must land the level the answer names")
 		require.Empty(t, ws.runPrompts, "wait for the coder model to finish switching")
 		switched := cmd().(modeSwitchedMsg)
 		require.NoError(t, switched.err)
@@ -999,10 +1060,67 @@ func TestCyclePermissionLevelWhilePlanning(t *testing.T) {
 	u.purpose = config.AgentPlan
 	u.levelCache.set(permission.LevelAuto)
 
-	require.Equal(t, permission.LevelBypass, u.cyclePermissionLevel())
+	got, err := u.cyclePermissionLevel()
+	require.NoError(t, err)
+	require.Equal(t, permission.LevelBypass, got)
 	require.Equal(t, permission.LevelBypass, ws.level)
 	require.Equal(t, config.AgentPlan, u.purpose, "the permission cycle must stay in planning")
 	require.Empty(t, ws.setMainCalledWith, "and must not switch agents")
+}
+
+// TestToggleYoloFailedWriteReportsError pins the client/server failure
+// path: when the workspace cannot take the write, the toggle reports the
+// error and leaves the caches untouched instead of optimistically
+// displaying a level the server never adopted (which the next probe
+// would silently revert).
+func TestToggleYoloFailedWriteReportsError(t *testing.T) {
+	t.Parallel()
+	u, ws := newPlanUI(t, "sess-1")
+	ws.failLevelSet = errors.New("server unreachable")
+
+	cmd := u.toggleModeAndReport(permission.PermissionModeYolo)
+	require.NotNil(t, cmd)
+	msg := cmd()
+	info, ok := msg.(util.InfoMsg)
+	require.True(t, ok)
+	require.Equal(t, util.InfoTypeError, info.Type)
+	require.NotEqual(t, permission.LevelBypass, u.levelCached(),
+		"the cache must not adopt a level the workspace rejected")
+	require.NotEqual(t, permission.LevelBypass, ws.level)
+	require.Equal(t, permission.PermissionModeNormal, u.permModeCached())
+}
+
+// TestToggleSysadminFailedWriteReportsError covers the same failure on
+// the raw-mode path the sysadmin toggle uses.
+func TestToggleSysadminFailedWriteReportsError(t *testing.T) {
+	t.Parallel()
+	u, ws := newPlanUI(t, "sess-1")
+	ws.failModeSet = errors.New("server unreachable")
+
+	cmd := u.toggleModeAndReport(permission.PermissionModeSysadmin)
+	require.NotNil(t, cmd)
+	msg := cmd()
+	info, ok := msg.(util.InfoMsg)
+	require.True(t, ok)
+	require.Equal(t, util.InfoTypeError, info.Type)
+	require.NotEqual(t, permission.PermissionModeSysadmin, u.permModeCached())
+	require.NotEqual(t, permission.PermissionModeSysadmin, ws.permMode)
+}
+
+// TestCyclePermissionLevelFailedWrite pins that a failed write stops the
+// cycle: the level cache keeps the pre-toggle value so the next cycle
+// starts from what the server actually has.
+func TestCyclePermissionLevelFailedWrite(t *testing.T) {
+	t.Parallel()
+	u, ws := newPlanUI(t, "sess-1")
+	u.levelCache.set(permission.LevelPrompt)
+	ws.failLevelSet = errors.New("server unreachable")
+
+	level, err := u.cyclePermissionLevel()
+	require.Error(t, err)
+	require.Equal(t, permission.LevelAuto, level, "the proposed level is reported alongside the error")
+	require.Equal(t, permission.LevelPrompt, u.levelCached())
+	require.Equal(t, permission.LevelPrompt, ws.level)
 }
 
 // TestHelpBarAdvertisesBothAxes: the two axes are independent, so the bar has

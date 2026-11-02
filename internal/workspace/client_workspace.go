@@ -454,8 +454,17 @@ func (w *ClientWorkspace) PermissionMode() permission.PermissionMode {
 	return proto.ProtoModeToPermission(w.cached().PermissionMode)
 }
 
-func (w *ClientWorkspace) PermissionSetMode(mode permission.PermissionMode) {
-	_ = w.client.SetPermissionMode(context.Background(), w.workspaceID(), proto.PermissionModeToProto(mode))
+func (w *ClientWorkspace) PermissionSetMode(mode permission.PermissionMode) error {
+	if err := w.client.SetPermissionMode(context.Background(), w.workspaceID(), proto.PermissionModeToProto(mode)); err != nil {
+		return err
+	}
+	// The SSE event updates the cached snapshot asynchronously; write it
+	// through now so toggle decisions reading PermissionMode() see the
+	// state the user just chose rather than the pre-write snapshot.
+	w.mu.Lock()
+	w.ws.PermissionMode = proto.PermissionModeToProto(mode)
+	w.mu.Unlock()
+	return nil
 }
 
 // -- Host context --
@@ -484,11 +493,18 @@ func (w *ClientWorkspace) PermissionLevel() permission.Level {
 	return permission.LevelPrompt
 }
 
-// PermissionSetLevel sets the approval level.
-func (w *ClientWorkspace) PermissionSetLevel(level permission.Level) {
+// PermissionSetLevel sets the approval level. The level endpoint is the
+// preferred path; a server from before it existed gets the level
+// reproduced from the mode and the auto-mode switch instead. Every write
+// is best-effort for the legacy path only: when neither path lands, the
+// error reaches the caller rather than being swallowed, so the UI can
+// report the toggle failed instead of displaying a level the server
+// never adopted (and having the next busy probe revert it).
+func (w *ClientWorkspace) PermissionSetLevel(level permission.Level) error {
 	ctx := context.Background()
-	if err := w.client.SetPermissionsLevel(ctx, w.workspaceID(), level); err == nil {
-		return
+	err := w.client.SetPermissionsLevel(ctx, w.workspaceID(), level)
+	if err == nil {
+		return nil
 	}
 	// Older server: reproduce the level from the mode and the auto-mode
 	// switch. The mode is cleared before auto is armed so there is no
@@ -497,8 +513,15 @@ func (w *ClientWorkspace) PermissionSetLevel(level permission.Level) {
 	if level == permission.LevelBypass {
 		mode = proto.WorkspacePermissionModeYolo
 	}
-	_ = w.client.SetPermissionMode(ctx, w.workspaceID(), mode)
-	_ = w.client.SetPermissionsAutoMode(ctx, w.workspaceID(), level == permission.LevelAuto)
+	modeErr := w.client.SetPermissionMode(ctx, w.workspaceID(), mode)
+	autoErr := w.client.SetPermissionsAutoMode(ctx, w.workspaceID(), level == permission.LevelAuto)
+	if modeErr != nil || autoErr != nil {
+		return fmt.Errorf("failed to set permissions level: %w", errors.Join(err, modeErr, autoErr))
+	}
+	w.mu.Lock()
+	w.ws.PermissionMode = mode
+	w.mu.Unlock()
+	return nil
 }
 
 // -- Questions --

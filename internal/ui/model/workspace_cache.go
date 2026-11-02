@@ -376,8 +376,14 @@ func (m *UI) staleWorkspaceRefreshCmds() []tea.Cmd {
 // discards any probe that was in flight with the previous level. The mode
 // cache follows the level: bypass is a prompt-skipping mode, and prompt and
 // auto both run under normal mode with auto tracked by the level itself.
-func (m *UI) setPermissionLevel(level permission.Level) {
-	m.com.Workspace.PermissionSetLevel(level)
+// An error means the workspace could not take the write (client/server
+// mode), so nothing is cached: the next probe reports what the server
+// actually has, and the caller reports the failure instead of silently
+// displaying a level the server never adopted.
+func (m *UI) setPermissionLevel(level permission.Level) error {
+	if err := m.com.Workspace.PermissionSetLevel(level); err != nil {
+		return err
+	}
 	m.levelCache.set(level)
 	mode := permission.PermissionModeNormal
 	if level == permission.LevelBypass {
@@ -386,6 +392,7 @@ func (m *UI) setPermissionLevel(level permission.Level) {
 	m.permModeCache.set(mode)
 	m.busyFetchGen++
 	m.setEditorPrompt(mode)
+	return nil
 }
 
 // levelCached reports the memoized permission level. Toggles write through
@@ -418,8 +425,9 @@ var permissionLevels = []permission.Level{
 
 // cyclePermissionLevel advances the permission axis and reports the level it
 // landed on. It knows nothing about which agent serves the turn, and nothing
-// that changes the agent changes this.
-func (m *UI) cyclePermissionLevel() permission.Level {
+// that changes the agent changes this. An error reports a failed write to
+// the workspace, with the level that would have been applied.
+func (m *UI) cyclePermissionLevel() (permission.Level, error) {
 	next := permissionLevels[0]
 	for i, level := range permissionLevels {
 		if level == m.levelCached() {
@@ -427,6 +435,8 @@ func (m *UI) cyclePermissionLevel() permission.Level {
 			break
 		}
 	}
-	m.setPermissionLevel(next)
-	return next
+	if err := m.setPermissionLevel(next); err != nil {
+		return next, err
+	}
+	return next, nil
 }

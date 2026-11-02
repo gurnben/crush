@@ -89,9 +89,10 @@ func (w *countingWorkspace) PermissionMode() permission.PermissionMode {
 	return w.permMode
 }
 
-func (w *countingWorkspace) PermissionSetMode(mode permission.PermissionMode) {
+func (w *countingWorkspace) PermissionSetMode(mode permission.PermissionMode) error {
 	w.permSetCalls++
 	w.permMode = mode
+	return nil
 }
 
 // PermissionLevel reads the level axis without counting: the busy probe
@@ -100,9 +101,10 @@ func (w *countingWorkspace) PermissionLevel() permission.Level {
 	return w.level
 }
 
-func (w *countingWorkspace) PermissionSetLevel(level permission.Level) {
+func (w *countingWorkspace) PermissionSetLevel(level permission.Level) error {
 	w.permSetCalls++
 	w.level = level
+	return nil
 }
 
 func (w *countingWorkspace) AgentMainID() string { return "" }
@@ -425,7 +427,9 @@ func TestCyclePermissionLevelWalksTheAxis(t *testing.T) {
 	warmCaches(m, false)
 
 	for _, want := range []permission.Level{permission.LevelAuto, permission.LevelBypass, permission.LevelPrompt} {
-		require.Equal(t, want, m.cyclePermissionLevel())
+		got, err := m.cyclePermissionLevel()
+		require.NoError(t, err)
+		require.Equal(t, want, got)
 		require.Equal(t, want, m.levelCached())
 		require.Equal(t, want, ws.level, "the cycle must write the level through to the workspace")
 	}
@@ -461,29 +465,37 @@ func TestLocalLevelChangeSupersedesInFlightProbe(t *testing.T) {
 	require.True(t, m.busyFetchInFlight, "re-dispatched refresh must be in flight")
 }
 
-// TestToggleYoloWritesThroughCache: both permission-mode toggle paths share
-// toggleMode, which must write the known new value through the cache —
-// no invalidation, no re-probe.
+// TestToggleYoloWritesThroughCache: yolo is the bypass level, so the
+// toggle is a level write that also updates the memoized mode. It must
+// write the known new value through the caches — no invalidation, no
+// re-probe.
 func TestToggleYoloWritesThroughCache(t *testing.T) {
 	pinTTLs(t)
 
 	ws := &countingWorkspace{ready: true, permMode: permission.PermissionModeNormal}
 	m := newBusyUI(ws)
 
-	got := m.toggleMode(permission.PermissionModeYolo)
+	got, err := m.toggleMode(permission.PermissionModeYolo)
+	require.NoError(t, err)
 	require.True(t, got)
+	require.Equal(t, permission.LevelBypass, ws.level,
+		"yolo toggles the bypass level, not the raw mode")
 	require.Equal(t, 1, ws.permSetCalls)
 	readsAfterToggle := ws.permCalls
-	require.Equal(t, 1, readsAfterToggle, "toggle reads the authoritative value exactly once")
+	require.Equal(t, 0, readsAfterToggle,
+		"the toggle reads the memoized mode, not the workspace")
 
 	require.Equal(t, permission.PermissionModeYolo, m.permModeCached(), "the new value must be served from the cache")
 	require.True(t, m.permModeCache.fresh(busyCacheTTL), "write-through must stamp the cache fresh")
 	m.permModeCached()
 	require.Equal(t, readsAfterToggle, ws.permCalls, "reads after the toggle must not re-probe")
 
-	got = m.toggleMode(permission.PermissionModeYolo)
+	got, err = m.toggleMode(permission.PermissionModeYolo)
+	require.NoError(t, err)
 	require.False(t, got)
 	require.Equal(t, permission.PermissionModeNormal, m.permModeCached())
+	require.Equal(t, permission.LevelPrompt, ws.level,
+		"turning yolo off lands at plain prompting")
 }
 
 // TestLocalYoloToggleSupersedesInFlightProbe pins the generation bump in
@@ -501,7 +513,7 @@ func TestLocalYoloToggleSupersedesInFlightProbe(t *testing.T) {
 	m.busyFetchInFlight = true
 	staleGen := m.busyFetchGen
 
-	require.True(t, m.toggleMode(permission.PermissionModeYolo))
+	require.True(t, mustToggleYolo(t, m))
 	require.NotEqual(t, staleGen, m.busyFetchGen,
 		"toggle must advance the busy generation to supersede in-flight probes")
 	require.Equal(t, permission.PermissionModeYolo, m.permModeCached(), "toggle must write the new value through the cache")
@@ -513,6 +525,15 @@ func TestLocalYoloToggleSupersedesInFlightProbe(t *testing.T) {
 		"stale probe must not overwrite the freshly toggled value")
 	require.NotEmpty(t, cmds, "stale probe must re-dispatch an authoritative refresh")
 	require.True(t, m.busyFetchInFlight, "re-dispatched refresh must be in flight")
+}
+
+// mustToggleYolo runs toggleMode and fails the test when the write
+// cannot be delivered.
+func mustToggleYolo(t *testing.T, m *UI) bool {
+	t.Helper()
+	enabled, err := m.toggleMode(permission.PermissionModeYolo)
+	require.NoError(t, err)
+	return enabled
 }
 
 // TestSendMessageSetsOptimisticBusy pins the esc-after-enter behavior:
