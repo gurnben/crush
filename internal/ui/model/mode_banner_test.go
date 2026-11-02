@@ -55,7 +55,11 @@ func TestLeavingAPermissionModeIsOrdinaryNews(t *testing.T) {
 		permission.PermissionModeYolo,
 	} {
 		ws := &countingWorkspace{ready: true, permMode: mode}
-		info := infoMsgFrom(t, newBusyUI(ws), mode)
+		m := newBusyUI(ws)
+		// The running UI keeps the memoized mode in step with the workspace;
+		// the toggle reads the memoized value, so seed it the same way.
+		m.permModeCache.set(mode)
+		info := infoMsgFrom(t, m, mode)
 
 		require.Equal(t, util.InfoTypeInfo, info.Type, "leaving %v is not a banner", mode)
 		require.Contains(t, info.Msg, "normal", "the message names where the toggle landed")

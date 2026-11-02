@@ -245,6 +245,10 @@ type Service interface {
 	// was cancelled is not returned.
 	ActiveRequest() (PermissionRequest, bool)
 	AutoApproveSession(sessionID string)
+	// SetPermissionMode writes the raw permission mode. The level axis is
+	// kept consistent: entering or leaving a prompt-skipping mode lands
+	// the auto mode off, so a mode-only write cannot leave the classifier
+	// armed under a mode that never consults it.
 	SetPermissionMode(mode PermissionMode)
 	PermissionMode() PermissionMode
 	// SetLevel sets the approval level; Level reports the level in effect.
@@ -267,6 +271,12 @@ type Service interface {
 	// mode). AutoMode reports the current runtime state.
 	SetAutoMode(enabled bool)
 	AutoMode() bool
+	// SeedAutoMode applies the config-derived initial auto-mode state,
+	// unless the state was already chosen at runtime, in which case the
+	// runtime state is kept and re-forwarded to freshly installed hooks.
+	// The coordinator calls this whenever it is (re-)initialized so a
+	// reconnect or workspace recovery cannot clobber a runtime choice.
+	SeedAutoMode(configEnabled bool)
 	// EscalationNote returns and clears the note recorded for a tool call
 	// that was escalated to the human and granted, so the tool can tell
 	// the model the action required manual approval. Empty when the grant
@@ -321,8 +331,15 @@ type permissionService struct {
 	hooksWG               sync.WaitGroup
 	denialReasons         *csync.Map[string, string]
 	escalatedCalls        *csync.Map[string, bool]
-	escalationNotes       *csync.Map[string, string]
+	escalationNotes      *csync.Map[string, string]
 	autoMode              atomic.Bool
+	// autoModePinned records that the auto-mode state was chosen at
+	// runtime (SetLevel / SetAutoMode) rather than seeded from config;
+	// a pinned state survives coordinator re-initialization.
+	autoModePinned atomic.Bool
+	// reevalWG tracks in-flight re-evaluations of open prompts so tests
+	// can wait for determinism (see waitForReevaluation).
+	reevalWG sync.WaitGroup
 
 	// used to make sure we only process one request at a time
 	requestMu       sync.Mutex
@@ -434,6 +451,96 @@ func (s *permissionService) Grant(permission PermissionRequest) bool {
 
 func (s *permissionService) Deny(permission PermissionRequest) bool {
 	return s.resolve(permission, false, true, nil)
+}
+
+// resolveImmediately settles a pending request without human input, the
+// way a mid-run level change does: the prompt was already on screen when
+// the approval level moved, so the request is re-decided under the new
+// level. Unlike Grant/Deny it records no escalation note (the call never
+// reached a human) and does not count as a human grant, so the auto
+// mode's trust counters are untouched.
+func (s *permissionService) resolveImmediately(req PermissionRequest, granted, denied bool, reason string) {
+	pending, ok := s.pendingRequests.Take(req.ID)
+	if !ok {
+		// Already resolved by a human, by cancellation, or by a
+		// concurrent re-evaluation. Exactly one path wins.
+		return
+	}
+	req = pending.req
+
+	// The call was escalated when the prompt was published, but no human
+	// will answer it now: drop the marker without recording a note.
+	s.escalatedCalls.Del(req.ToolCallID)
+	if denied && reason != "" {
+		s.denialReasons.Set(req.ToolCallID, reason)
+	}
+
+	s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+		SessionID:  req.SessionID,
+		ToolCallID: req.ToolCallID,
+		Granted:    granted,
+		Denied:     denied,
+		Reason:     reason,
+	})
+
+	if denied {
+		s.dispatchPermissionDenied(req)
+	}
+
+	// respCh is buffered (cap 1) and only one resolver exists per request
+	// because Take removed the entry, so this send never blocks.
+	pending.respCh <- granted
+
+	s.activeRequestMu.Lock()
+	if s.activeRequest != nil && s.activeRequest.ID == req.ID {
+		s.activeRequest = nil
+	}
+	s.activeRequestMu.Unlock()
+}
+
+// reevaluatePending settles the prompts that are open right now under the
+// level that was just installed, so a mid-run mode change applies to the
+// prompt on screen instead of only to the next tool call. Bypass grants
+// every open request; auto runs the policy hooks (the classifier decides
+// allow or deny, and an unsure verdict leaves the request for the human);
+// prompt leaves everything alone. The work is async: the classifier can
+// take hundreds of milliseconds and the setters run on the UI's render
+// goroutine.
+func (s *permissionService) reevaluatePending() {
+	level := s.Level()
+	if level == LevelPrompt {
+		return
+	}
+	var pending []PermissionRequest
+	for p := range s.pendingRequests.Seq() {
+		pending = append(pending, p.req)
+	}
+	if len(pending) == 0 {
+		return
+	}
+	s.reevalWG.Add(1)
+	go func() {
+		defer s.reevalWG.Done()
+		for _, req := range pending {
+			s.reevaluateOne(level, req)
+		}
+	}()
+}
+
+// reevaluateOne re-decides a single open request under level.
+func (s *permissionService) reevaluateOne(level Level, req PermissionRequest) {
+	if level == LevelBypass {
+		s.resolveImmediately(req, true, false, "")
+		return
+	}
+	if h := s.currentHooks(); h != nil {
+		switch res := h.PrePermission(context.Background(), req); res.Decision {
+		case HookDecisionAllow:
+			s.resolveImmediately(req, true, false, "")
+		case HookDecisionDeny:
+			s.resolveImmediately(req, false, true, res.Reason)
+		}
+	}
 }
 
 func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRequest) (bool, error) {
@@ -673,14 +780,36 @@ func (s *permissionService) EscalationNote(toolCallID string) string {
 }
 
 // SetAutoMode sets the runtime auto-mode state and forwards it to any
-// installed hooks that support runtime toggling.
+// installed hooks that support runtime toggling. A state set here is a
+// runtime choice: it outranks the config-derived seed on any later
+// coordinator re-initialization (see SeedAutoMode), and open prompts are
+// re-decided under it (see reevaluatePending).
 func (s *permissionService) SetAutoMode(enabled bool) {
+	s.autoModePinned.Store(true)
+	s.setAutoMode(enabled)
+}
+
+// SeedAutoMode applies the config-derived initial auto-mode state. A
+// state already chosen at runtime (SetLevel / SetAutoMode) wins instead:
+// re-initializing the coordinator — a reconnect, a workspace recovery, a
+// second client attaching — re-arms the freshly installed hooks with the
+// live state rather than reverting the level to the config value.
+func (s *permissionService) SeedAutoMode(configEnabled bool) {
+	enabled := configEnabled
+	if s.autoModePinned.Load() {
+		enabled = s.autoMode.Load()
+	}
+	s.setAutoMode(enabled)
+}
+
+func (s *permissionService) setAutoMode(enabled bool) {
 	s.autoMode.Store(enabled)
 	if h := s.currentHooks(); h != nil {
 		if toggler, ok := h.(AutoModeToggler); ok {
 			toggler.SetAutoModeEnabled(enabled)
 		}
 	}
+	s.reevaluatePending()
 }
 
 // AutoMode reports the runtime auto-mode state.
@@ -718,11 +847,33 @@ func (s *permissionService) waitForHookDispatches() {
 	s.hooksWG.Wait()
 }
 
+// waitForReevaluation blocks until every in-flight re-evaluation of open
+// prompts (triggered by a level change) has completed. Test-only helper.
+func (s *permissionService) waitForReevaluation() {
+	s.reevalWG.Wait()
+}
+
 func (s *permissionService) SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[PermissionNotification] {
 	return s.notificationBroker.Subscribe(ctx)
 }
 
+// SetPermissionMode writes the raw permission mode and keeps the level
+// axis honest: a prompt-skipping mode cannot consult the classifier
+// (Request returns before hooks), so the auto mode is disarmed, and
+// returning to normal lands at plain prompting rather than resuming a
+// classifier armed before the excursion. Without this, a mode-only write
+// leaves the reported level and the actual gating naming different
+// states. Open prompts are re-decided under the new state.
 func (s *permissionService) SetPermissionMode(mode PermissionMode) {
+	s.setMode(mode)
+	s.SetAutoMode(false)
+}
+
+// setMode stores the mode and publishes the change without re-evaluating
+// open prompts: SetLevel sequences a mode write with an auto-mode write
+// and lets the SetAutoMode leg re-evaluate once, from the final composite
+// state, rather than re-deciding mid-transition.
+func (s *permissionService) setMode(mode PermissionMode) {
 	s.modeMu.Lock()
 	s.mode = mode
 	s.modeMu.Unlock()
@@ -731,22 +882,19 @@ func (s *permissionService) SetPermissionMode(mode PermissionMode) {
 
 // SetLevel moves between the three approval levels, keeping the mode and
 // the auto-mode switch consistent so no state exists that the UI cannot
-// name.
+// name. A level set here is a runtime choice, and prompts that are open
+// when it lands are re-decided under it.
 func (s *permissionService) SetLevel(level Level) {
 	switch level {
 	case LevelBypass:
-		// The classifier cannot run under bypass — Request returns before
-		// hooks — so leaving it armed would only make the state lie.
 		s.SetPermissionMode(PermissionModeYolo)
-		s.SetAutoMode(false)
 	case LevelAuto:
 		// Drop the bypass first: a reader watching mid-call should never
 		// see a moment of unconditional approval on the way to auto.
-		s.SetPermissionMode(PermissionModeNormal)
+		s.setMode(PermissionModeNormal)
 		s.SetAutoMode(true)
 	default:
 		s.SetPermissionMode(PermissionModeNormal)
-		s.SetAutoMode(false)
 	}
 }
 

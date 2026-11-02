@@ -102,6 +102,31 @@ func TestSetLevelForwardsToHooks(t *testing.T) {
 	assert.Equal(t, []bool{true, false}, hooks.enabled)
 }
 
+// TestSetPermissionModeDisarmsAutoMode pins the single-authority rule:
+// a mode-only write cannot leave the classifier armed, because the level
+// derived from the mode would then disagree with what Request does.
+// Turning yolo off lands at plain prompting rather than silently
+// resuming the classifier that ran before the excursion.
+func TestSetPermissionModeDisarmsAutoMode(t *testing.T) {
+	t.Parallel()
+
+	hooks := &togglingHooks{}
+	svc := NewPermissionService(t.TempDir(), nil, nil)
+	svc.SetPermissionHooks(hooks)
+	svc.SetLevel(LevelAuto)
+	require.True(t, svc.AutoMode())
+
+	svc.SetPermissionMode(PermissionModeYolo)
+	assert.False(t, svc.AutoMode(), "a prompt-skipping mode cannot leave the classifier armed")
+	assert.Equal(t, LevelBypass, svc.Level())
+	assert.Equal(t, []bool{true, false}, hooks.enabled)
+
+	svc.SetLevel(LevelAuto)
+	svc.SetPermissionMode(PermissionModeNormal)
+	assert.False(t, svc.AutoMode(), "leaving a mode lands at plain prompting, not a resumed classifier")
+	assert.Equal(t, LevelPrompt, svc.Level())
+}
+
 func TestParseLevel(t *testing.T) {
 	t.Parallel()
 

@@ -2360,7 +2360,11 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 
 	// Command dialog messages.
 	case dialog.ActionCyclePermissionLevel:
-		level := m.cyclePermissionLevel()
+		level, err := m.cyclePermissionLevel()
+		if err != nil {
+			cmds = append(cmds, util.ReportError(err))
+			break
+		}
 		cmds = append(cmds, levelBanner(level))
 		// The palette stays open and only its approval row redraws, so the user
 		// watches the highlight move to the next option. Closing here would
@@ -2373,7 +2377,10 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			}
 		}
 	case dialog.ActionSetPermissionLevel:
-		m.setPermissionLevel(msg.Level)
+		if err := m.setPermissionLevel(msg.Level); err != nil {
+			cmds = append(cmds, util.ReportError(err))
+			break
+		}
 		cmds = append(cmds, levelBanner(msg.Level))
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionCyclePurpose:
@@ -3471,7 +3478,12 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			// Ctrl+Y walks the permission axis only. Which agent serves the
 			// turn is Shift+Tab's business, so this key no longer diverts out
 			// of planning.
-			cmds = append(cmds, levelBanner(m.cyclePermissionLevel()))
+			level, err := m.cyclePermissionLevel()
+			if err != nil {
+				cmds = append(cmds, util.ReportError(err))
+			} else {
+				cmds = append(cmds, levelBanner(level))
+			}
 			return true
 		}
 		return false
@@ -5001,19 +5013,23 @@ func editorFileMsg(path string) tea.Msg {
 	}
 }
 
-// setPermissionMode writes mode to the workspace and through the
+// setPermissionMode writes a raw mode to the workspace and through the
 // permission-mode cache (no re-probe needed), then refreshes the editor
-// prompt. Every permission-mode write goes through here, so the cache is
-// never left trailing the workspace.
-func (m *UI) setPermissionMode(mode permission.PermissionMode) {
-	m.com.Workspace.PermissionSetMode(mode)
+// prompt. The service keeps the level axis consistent on mode-only writes
+// (auto mode is disarmed), so the level cache follows: a prompt-skipping
+// mode reads as bypass, anything else as prompting. Only sysadmin uses
+// this path; yolo is the bypass level and goes through setPermissionLevel.
+// An error means the workspace could not take the write (client/server
+// mode): nothing is cached, and the caller reports the failure instead of
+// displaying a mode the server never adopted.
+func (m *UI) setPermissionMode(mode permission.PermissionMode) error {
+	if err := m.com.Workspace.PermissionSetMode(mode); err != nil {
+		return err
+	}
 	m.permModeCache.set(mode)
-	// Keep the derived level axis in step so the badge and placeholder do
-	// not disagree with the mode: a prompt-skipping mode reads as bypass,
-	// and leaving one lands back at plain prompting.
 	if mode.SkipsPrompts() {
 		m.levelCache.set(permission.LevelBypass)
-	} else if m.levelCached() == permission.LevelBypass {
+	} else {
 		m.levelCache.set(permission.LevelPrompt)
 	}
 	// Supersede any in-flight busy/permission probe: its result carries the
@@ -5023,29 +5039,39 @@ func (m *UI) setPermissionMode(mode permission.PermissionMode) {
 	// re-dispatches the stale probe.
 	m.busyFetchGen++
 	m.setEditorPrompt(mode)
+	return nil
 }
 
-// setYolo turns YOLO on or off. Turning it off goes all the way back to
-// normal, so a sysadmin session that declines YOLO really does get its
-// prompts back rather than landing one rung down.
-func (m *UI) setYolo(on bool) {
-	mode := permission.PermissionModeNormal
+// setYolo turns YOLO on or off. YOLO is the bypass level, so it moves on
+// the level axis: turning it off goes all the way back to plain
+// prompting, and a classifier armed before the excursion is not silently
+// resumed.
+func (m *UI) setYolo(on bool) error {
+	level := permission.LevelPrompt
 	if on {
-		mode = permission.PermissionModeYolo
+		level = permission.LevelBypass
 	}
-	m.setPermissionMode(mode)
+	return m.setPermissionLevel(level)
 }
 
-// toggleMode flips the permission mode between target and Normal. It reports
-// whether target is now the active mode.
-func (m *UI) toggleMode(target permission.PermissionMode) (enabled bool) {
-	mode := permission.PermissionModeNormal
-	if m.com.Workspace.PermissionMode() != target {
-		mode = target
-		enabled = true
+// toggleMode flips the permission posture between target and plain
+// prompting, and reports whether target is now active. Yolo is the bypass
+// level, so it moves on the level axis; sysadmin is a raw mode (it also
+// drops the exec-time block list) and moves through setPermissionMode.
+// The current state is read from the write-through caches rather than the
+// workspace, whose snapshot in client/server mode can trail a toggle the
+// UI itself just made.
+func (m *UI) toggleMode(target permission.PermissionMode) (enabled bool, err error) {
+	if target == permission.PermissionModeYolo {
+		if m.permModeCached() == permission.PermissionModeYolo {
+			return false, m.setPermissionLevel(permission.LevelPrompt)
+		}
+		return true, m.setPermissionLevel(permission.LevelBypass)
 	}
-	m.setPermissionMode(mode)
-	return enabled
+	if m.permModeCached() == target {
+		return false, m.setPermissionMode(permission.PermissionModeNormal)
+	}
+	return true, m.setPermissionMode(target)
 }
 
 // permissionModeName is the human-readable name for a permission mode.
@@ -5068,7 +5094,11 @@ func permissionModeName(mode permission.PermissionMode) string {
 // "disabled", which is a lie when the toggle landed somewhere rather than
 // switching something off.
 func (m *UI) toggleModeAndReport(target permission.PermissionMode) tea.Cmd {
-	if !m.toggleMode(target) {
+	enabled, err := m.toggleMode(target)
+	if err != nil {
+		return util.ReportError(err)
+	}
+	if !enabled {
 		return util.ReportInfo("Permission mode: " + permissionModeName(permission.PermissionModeNormal))
 	}
 	switch target {
@@ -5263,7 +5293,16 @@ func (m *UI) purposeCandidates() []string {
 // what made the old cycle's "only the cycle may turn this back off"
 // bookkeeping necessary.
 func (m *UI) cyclePurpose() tea.Cmd {
-	if m.isAgentBusy() || m.modeSwitching {
+	// The agent-wide busy flag follows the current main agent, so it
+	// reads idle while the agent that actually serves the turn is still
+	// running. The session-scoped oracle covers that window (and the
+	// gap while a queued prompt hands off between turns); the
+	// coordinator's own ErrAgentBusy rejection is the backstop.
+	busy := m.modeSwitching || m.isAgentBusy()
+	if !busy && m.hasSession() {
+		busy = m.turnInFlight(m.session.ID)
+	}
+	if busy {
 		return util.ReportWarn("Agent is busy, please wait before switching mode...")
 	}
 	candidates := m.purposeCandidates()
@@ -6410,10 +6449,11 @@ func (m *UI) resetPlanModeState() tea.Cmd {
 	if !m.planning() {
 		return nil
 	}
-	// The backend rejects agent switches while a run is active (409). When
-	// one is, keep the mode as-is: the server's active agent still matches
-	// what the editor shows, and the next Shift+Tab lands back in the
-	// standard purpose once the run finishes.
+	// Switching agents is rejected while a run is active (the backend
+	// answers 409 and the coordinator itself refuses in local mode).
+	// When a run is active, keep the mode as-is: the server's active
+	// agent still matches what the editor shows, and the next Shift+Tab
+	// lands back in the standard purpose once the run finishes.
 	if m.isAgentBusy() {
 		return nil
 	}
@@ -6433,13 +6473,23 @@ func (m *UI) openPlanHandoff() {
 	inline := dialog.NewPlanHandoffInline(m.com)
 	inline.OnConfirm = func(yolo bool) tea.Cmd {
 		// The handoff asks a yes/no question about YOLO, so answer it
-		// literally: declining drops the session back to normal.
+		// literally: declining drops the session back to plain prompting.
 		if m.yoloActive() != yolo {
-			m.setYolo(yolo)
+			if err := m.setYolo(yolo); err != nil {
+				return util.ReportError(err)
+			}
 		}
 		m.setPlanReadyPending("")
 		sessionID := m.session.ID
 		cmd := m.setPurpose(config.AgentCoder)
+		// The purpose can already be coder — Shift+Tab switched away
+		// from planning while this handoff stayed open — and a switch
+		// rejected mid-run also returns after reporting its own error.
+		// Either way there is no cmd to wrap, and calling through a nil
+		// one would panic.
+		if cmd == nil {
+			return nil
+		}
 		return func() tea.Msg {
 			result := cmd()
 			if switched, ok := result.(modeSwitchedMsg); ok {
