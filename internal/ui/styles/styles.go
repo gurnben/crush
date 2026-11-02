@@ -203,6 +203,12 @@ type Styles struct {
 		QuestionRadioOff   lipgloss.Style // Unselected single-choice radio.
 		QuestionCheckOn    lipgloss.Style // Checked multi-choice indicator.
 		QuestionCheckOff   lipgloss.Style // Unchecked multi-choice indicator.
+
+		// Sysadmin mode prompt (" # " icon + ":::" dots).
+		PromptSysadminIconFocused lipgloss.Style
+		PromptSysadminIconBlurred lipgloss.Style
+		PromptSysadminDotsFocused lipgloss.Style
+		PromptSysadminDotsBlurred lipgloss.Style
 	}
 
 	// Radio
@@ -624,17 +630,20 @@ type Styles struct {
 		Help lipgloss.Style
 
 		// Mode badges shown before the help hints.
-		ModeBadgePlan lipgloss.Style
-		ModeBadgeYolo lipgloss.Style
-		ModeBadgeAuto lipgloss.Style
+		ModeBadgePlan     lipgloss.Style
+		ModeBadgeYolo     lipgloss.Style
+		ModeBadgeAuto     lipgloss.Style
+		ModeBadgeSysadmin lipgloss.Style
 
 		// Full-width banners shown when switching modes.
-		ModeBannerPlan      lipgloss.Style
-		ModeBannerPlanBadge lipgloss.Style
-		ModeBannerYolo      lipgloss.Style
-		ModeBannerYoloBadge lipgloss.Style
-		ModeBannerAuto      lipgloss.Style
-		ModeBannerAutoBadge lipgloss.Style
+		ModeBannerPlan          lipgloss.Style
+		ModeBannerPlanBadge     lipgloss.Style
+		ModeBannerYolo          lipgloss.Style
+		ModeBannerYoloBadge     lipgloss.Style
+		ModeBannerAuto          lipgloss.Style
+		ModeBannerAutoBadge     lipgloss.Style
+		ModeBannerSysadmin      lipgloss.Style
+		ModeBannerSysadminBadge lipgloss.Style
 
 		ErrorIndicator   lipgloss.Style
 		WarnIndicator    lipgloss.Style

@@ -65,7 +65,7 @@ func TestPrePermissionBridge_Deny(t *testing.T) {
 		]
 	}`)
 
-	svc := permission.NewPermissionService(workDir, false, nil, nil)
+	svc := permission.NewPermissionService(workDir, nil, nil)
 	svc.SetPermissionHooks(newPermissionHookDispatcher(store, nil))
 
 	notifications := svc.SubscribeNotifications(context.Background())
@@ -95,7 +95,7 @@ func TestPrePermissionBridge_Allow(t *testing.T) {
 		]
 	}`)
 
-	svc := permission.NewPermissionService(workDir, false, nil, nil)
+	svc := permission.NewPermissionService(workDir, nil, nil)
 	svc.SetPermissionHooks(newPermissionHookDispatcher(store, nil))
 
 	notifications := svc.SubscribeNotifications(context.Background())
@@ -125,7 +125,7 @@ func TestPrePermissionBridge_SilenceFallsThroughToPrompt(t *testing.T) {
 		]
 	}`)
 
-	svc := permission.NewPermissionService(workDir, false, nil, nil)
+	svc := permission.NewPermissionService(workDir, nil, nil)
 	svc.SetPermissionHooks(newPermissionHookDispatcher(store, nil))
 
 	events := svc.Subscribe(context.Background())
@@ -157,7 +157,7 @@ func TestPrePermissionBridge_SilenceFallsThroughToPrompt(t *testing.T) {
 func TestPrePermissionBridge_NoHooksConfigured(t *testing.T) {
 	store, workDir := loadStoreWithHooks(t, `{}`)
 
-	svc := permission.NewPermissionService(workDir, false, nil, nil)
+	svc := permission.NewPermissionService(workDir, nil, nil)
 	svc.SetPermissionHooks(newPermissionHookDispatcher(store, nil))
 
 	events := svc.Subscribe(context.Background())
@@ -197,7 +197,7 @@ func TestPermissionDeniedBridge(t *testing.T) {
 	}`)
 	logFile := filepath.Join(workDir, "denials.log")
 
-	svc := permission.NewPermissionService(workDir, false, nil, nil)
+	svc := permission.NewPermissionService(workDir, nil, nil)
 	svc.SetPermissionHooks(newPermissionHookDispatcher(store, nil))
 
 	events := svc.Subscribe(context.Background())

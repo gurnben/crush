@@ -269,7 +269,7 @@ type testWorkspace struct {
 	agentReady        bool
 	agentBusy         bool
 	runPrompts        []string
-	yolo              bool
+	permMode          permission.PermissionMode
 	runHidden         []bool
 	compactCalls      []bool
 
@@ -322,6 +322,14 @@ func (w *testWorkspace) AgentMainCandidates() []string {
 	return workspace.DefaultMainAgents
 }
 
+func (w *testWorkspace) PermissionMode() permission.PermissionMode {
+	return w.permMode
+}
+
+func (w *testWorkspace) PermissionSetMode(mode permission.PermissionMode) {
+	w.permMode = mode
+}
+
 func (w *testWorkspace) AgentIsReady() bool {
 	return w.agentReady
 }
@@ -368,8 +376,7 @@ func TestCyclePurposeWalksPublishedAgents(t *testing.T) {
 		applyPurposeSwitchMsg(ui, ui.cyclePurpose())
 		require.Equal(t, want, ui.purpose)
 		require.Equal(t, permission.LevelAuto, ws.level,
-			"the purpose cycle must leave the permission axis alone")
-	}
+			"the purpose cycle must leave the permission axis alone")	}
 }
 
 // TestCyclePurposeFollowsTheWorkspaceList: candidates come from the
@@ -430,6 +437,18 @@ func newPlanUI(t *testing.T, sessionID string) (*UI, *testWorkspace) {
 		chat:     NewChat(com, config.ScrollbarDefault),
 	}
 	return u, ws
+}
+
+// seedYolo puts the workspace and the UI's memoized permission mode in the
+// same state the running UI keeps them in: every write goes through
+// setPermissionMode, so the cache never trails the workspace.
+func seedYolo(u *UI, ws *testWorkspace, on bool) {
+	mode := permission.PermissionModeNormal
+	if on {
+		mode = permission.PermissionModeYolo
+	}
+	ws.PermissionSetMode(mode)
+	u.permModeCache.set(mode)
 }
 
 // applyPurposeSwitchMsg runs a setPurpose command to completion the way the
@@ -806,8 +825,7 @@ func TestSetPurpose_TracksModeSwitching(t *testing.T) {
 	msg, ok := cmd().(modeSwitchedMsg)
 	require.True(t, ok)
 	require.NoError(t, msg.err)
-	require.Equal(t, config.AgentCoder, msg.agentID)
-}
+	require.Equal(t, config.AgentCoder, msg.agentID)}
 
 func TestHandlePlanHandoff_SetsPendingPlan(t *testing.T) {
 	t.Parallel()
@@ -916,24 +934,11 @@ func TestPlanHandoffExplicitPermissionMode(t *testing.T) {
 	t.Parallel()
 	for _, bypass := range []bool{false, true} {
 		u, ws := newPlanUI(t, "sess-1")
-		// Start from the opposite level so the assertion shows that the
-		// handoff actually sets it rather than leaving whatever was there.
-		start := permission.LevelBypass
-		if bypass {
-			start = permission.LevelPrompt
-		}
-		ws.level = start
-		u.levelCache.set(start)
-
+		seedYolo(u, ws, !bypass)
 		u.openPlanHandoff()
 		inline := u.activeInline.(*dialog.PlanHandoffInline)
 		cmd := inline.OnConfirm(bypass)
-
-		want := permission.LevelPrompt
-		if bypass {
-			want = permission.LevelBypass
-		}
-		require.Equal(t, want, ws.level)
+		require.Equal(t, bypass, ws.permMode != permission.PermissionModeNormal)
 		require.Empty(t, ws.runPrompts, "wait for the coder model to finish switching")
 		switched := cmd().(modeSwitchedMsg)
 		require.NoError(t, switched.err)
@@ -948,8 +953,7 @@ func TestPlanPromptIgnoresBypassLevel(t *testing.T) {
 	u, _ := newPlanUI(t, "sess-1")
 	u.textarea.SetWidth(40)
 	u.textarea.Focus()
-	u.levelCache.set(permission.LevelBypass)
-	u.setEditorPrompt()
+	u.setEditorPrompt(permission.PermissionModeYolo)
 	require.Contains(t, u.textarea.View(), "⏸")
 	require.NotContains(t, u.textarea.View(), " ! ")
 }
@@ -1078,5 +1082,4 @@ func TestAutoModePlaceholder(t *testing.T) {
 
 	u.setPermissionLevel(permission.LevelBypass)
 	u.updatePlaceholder()
-	require.Equal(t, "Go crazy", u.textarea.Placeholder)
-}
+	require.Equal(t, "Go crazy", u.textarea.Placeholder)}

@@ -48,12 +48,6 @@ type ActionSelectModel struct {
 
 // Messages for commands
 type (
-	ActionNewSession        struct{}
-	ActionToggleHelp        struct{}
-	ActionToggleCompactMode struct{}
-	ActionToggleThinking    struct{}
-	ActionTogglePills       struct{}
-	ActionExternalEditor    struct{}
 	// ActionCyclePermissionLevel advances the permission axis one step, the
 	// same step Ctrl+Y takes. The palette keeps showing the row afterwards so
 	// the user can watch the highlight move.
@@ -69,6 +63,15 @@ type (
 	// Shift+Tab takes. Like the approval row, the palette keeps showing the
 	// row afterwards so the user can watch the mark move.
 	ActionCyclePurpose            struct{}
+
+	ActionNewSession              struct{}
+	ActionToggleHelp              struct{}
+	ActionToggleCompactMode       struct{}
+	ActionToggleThinking          struct{}
+	ActionTogglePills             struct{}
+	ActionExternalEditor          struct{}
+	ActionToggleYoloMode          struct{}
+	ActionToggleSysadminMode      struct{}
 	ActionToggleNotifications     struct{}
 	ActionSelectNotificationStyle struct {
 		Style string

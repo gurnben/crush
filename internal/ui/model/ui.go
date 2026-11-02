@@ -445,11 +445,13 @@ type UI struct {
 	// in-flight fetch captures it at dispatch and its result is discarded
 	// if the generation has moved on (see workspace_cache.go).
 	promptQueueGen uint64
-	// agentBusyCache / levelCache memoize the workspace busy and permission
-	// probes (synchronous HTTP round-trips in client/server mode). Reads
-	// never probe; refreshes happen off-thread (see workspace_cache.go).
+	// agentBusyCache / levelCache / permModeCache memoize the workspace busy
+	// and permission probes (synchronous HTTP round-trips in client/server
+	// mode). Reads never probe; refreshes happen off-thread (see
+	// workspace_cache.go).
 	agentBusyCache    ttlCache[bool]
 	levelCache        ttlCache[permission.Level]
+	permModeCache     modeTTLCache
 	busyFetchInFlight bool
 	// agentReady / agentModel memoize the coordinator readiness and
 	// selected model (AgentIsReady/AgentModel are synchronous HTTP GETs in
@@ -622,10 +624,12 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 		ui.userThemeSelected = common.ThemeNameFromConfig(cfg) != ""
 	}
 
-	// Seed the permission-level cache once at construction; afterwards it is
+	// Seed the permission caches once at construction; afterwards they are
 	// kept fresh by write-through toggles and off-thread refreshes so Update
 	// and View never probe the workspace synchronously.
 	ui.levelCache.set(com.Workspace.PermissionLevel())
+	permMode := com.Workspace.PermissionMode()
+	ui.permModeCache.set(permMode)
 
 	// Seed the memoized agent ready/model state the same way so the first
 	// frame renders the model info; the busy probe keeps it fresh
@@ -641,7 +645,7 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 	if ui.purpose == "" {
 		ui.purpose = config.AgentCoder
 	}
-	ui.setEditorPrompt()
+	ui.setEditorPrompt(permMode)
 	ui.randomizePlaceholders()
 	ui.textarea.Placeholder = ui.readyPlaceholder
 	ui.status = status
@@ -1342,7 +1346,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// editor layout area, above the textarea.
 		if m.activeInline == nil && msg.Button == uv.MouseLeft && len(m.attachments.List()) > 0 && msg.Y == m.layout.editor.Min.Y {
 			relX := msg.X - m.layout.editor.Min.X
-			if m.attachments.HandleClick(relX) {
+			if m.changeAttachments(func() bool { return m.attachments.HandleClick(relX) }) {
 				return m, tea.Batch(cmds...)
 			}
 		}
@@ -1731,7 +1735,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if _, isAttachment := msg.(message.Attachment); isAttachment && m.attachmentsLimitReached() {
 		max := m.currentModelMaxAttachments()
 		cmds = append(cmds, util.ReportWarn(fmt.Sprintf("Maximum attachment reached for this session (%d)", max)))
-	} else if m.attachments.Update(msg) {
+	} else if m.changeAttachments(func() bool { return m.attachments.Update(msg) }) {
 		m.invalidateFrames()
 	}
 	// Any update may have put a spinner on screen (new message, tool update,
@@ -2377,6 +2381,12 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		// redrawn here: it is redrawn by applyPurposeSwitch, which is the
 		// message that reports the switch actually took effect.
 		cmds = append(cmds, m.cyclePurpose())
+	case dialog.ActionToggleYoloMode:
+		cmds = append(cmds, m.toggleModeAndReport(permission.PermissionModeYolo))
+		m.dialog.CloseDialog(dialog.CommandsID)
+	case dialog.ActionToggleSysadminMode:
+		cmds = append(cmds, m.toggleModeAndReport(permission.PermissionModeSysadmin))
+		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionSelectNotificationStyle:
 		cfg := m.com.Config()
 		if cfg != nil && cfg.Options != nil {
@@ -3558,7 +3568,7 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				}
 			}
 
-			if ok := m.attachments.Update(msg); ok {
+			if m.changeAttachments(func() bool { return m.attachments.Update(msg) }) {
 				return tea.Batch(cmds...)
 			}
 
@@ -3612,14 +3622,14 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 
 				if m.bangMode && value != "" {
 					m.bangMode = false
-					m.setEditorPrompt()
+					m.setEditorPrompt(m.permModeCached())
 					m.randomizePlaceholders()
 					m.historyReset()
 					return tea.Batch(m.runShellCommand(value))
 				}
 
 				attachments := m.attachments.List()
-				m.attachments.Reset()
+				m.changeAttachments(func() bool { m.attachments.Reset(); return true })
 				if len(value) == 0 && !message.ContainsTextAttachment(attachments) {
 					// Enter on an empty editor while a ready plan is pending
 					// reopens the dismissed handoff prompt.
@@ -3713,7 +3723,7 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				if m.bangMode && m.bangWasEmpty && msg.Code == tea.KeyBackspace {
 					m.bangMode = false
 					m.bangWasEmpty = false
-					m.setEditorPrompt()
+					m.setEditorPrompt(m.permModeCached())
 					break
 				}
 
@@ -3762,7 +3772,7 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 					m.textarea.SetValue(stripped)
 					m.textarea.SetCursorColumn(max(0, col-(len(newVal)-len(stripped))))
 					_ = line // cursor line doesn't change; prefix removed
-					m.setEditorPrompt()
+					m.setEditorPrompt(m.permModeCached())
 				} else if m.bangMode && newVal == "" && curValue != "" {
 					// Just cleared last character; mark empty, stay in bang mode.
 					m.bangWasEmpty = true
@@ -4030,6 +4040,7 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	// Add status and help layer
 	m.status.SetHideHelp(isOnboarding)
 	m.status.SetMode(m.purpose, m.levelCached())
+	m.status.SetPermMode(m.permModeCached())
 	m.status.Draw(scr, layout.status)
 
 	// Draw completions popup if open
@@ -4990,11 +5001,92 @@ func editorFileMsg(path string) tea.Msg {
 	}
 }
 
+// setPermissionMode writes mode to the workspace and through the
+// permission-mode cache (no re-probe needed), then refreshes the editor
+// prompt. Every permission-mode write goes through here, so the cache is
+// never left trailing the workspace.
+func (m *UI) setPermissionMode(mode permission.PermissionMode) {
+	m.com.Workspace.PermissionSetMode(mode)
+	m.permModeCache.set(mode)
+	// Keep the derived level axis in step so the badge and placeholder do
+	// not disagree with the mode: a prompt-skipping mode reads as bypass,
+	// and leaving one lands back at plain prompting.
+	if mode.SkipsPrompts() {
+		m.levelCache.set(permission.LevelBypass)
+	} else if m.levelCached() == permission.LevelBypass {
+		m.levelCache.set(permission.LevelPrompt)
+	}
+	// Supersede any in-flight busy/permission probe: its result carries the
+	// old generation and would otherwise overwrite the value we just wrote.
+	// Bump the generation (rather than invalidateBusyCaches, which would
+	// clear the fresh value) so applyBusyState's guard discards and
+	// re-dispatches the stale probe.
+	m.busyFetchGen++
+	m.setEditorPrompt(mode)
+}
+
+// setYolo turns YOLO on or off. Turning it off goes all the way back to
+// normal, so a sysadmin session that declines YOLO really does get its
+// prompts back rather than landing one rung down.
+func (m *UI) setYolo(on bool) {
+	mode := permission.PermissionModeNormal
+	if on {
+		mode = permission.PermissionModeYolo
+	}
+	m.setPermissionMode(mode)
+}
+
+// toggleMode flips the permission mode between target and Normal. It reports
+// whether target is now the active mode.
+func (m *UI) toggleMode(target permission.PermissionMode) (enabled bool) {
+	mode := permission.PermissionModeNormal
+	if m.com.Workspace.PermissionMode() != target {
+		mode = target
+		enabled = true
+	}
+	m.setPermissionMode(mode)
+	return enabled
+}
+
+// permissionModeName is the human-readable name for a permission mode.
+func permissionModeName(mode permission.PermissionMode) string {
+	switch mode {
+	case permission.PermissionModeYolo:
+		return "yolo"
+	case permission.PermissionModeSysadmin:
+		return "sysadmin"
+	default:
+		return "normal"
+	}
+}
+
+// toggleModeAndReport flips the permission mode and announces where it
+// landed. Reaching a mode from the command palette shows the same badge
+// banner as reaching it from a toggle, so one mode does not announce itself
+// two different ways depending on the road in. Dropping back to normal is
+// ordinary news and reads as such: it names the mode rather than saying
+// "disabled", which is a lie when the toggle landed somewhere rather than
+// switching something off.
+func (m *UI) toggleModeAndReport(target permission.PermissionMode) tea.Cmd {
+	if !m.toggleMode(target) {
+		return util.ReportInfo("Permission mode: " + permissionModeName(permission.PermissionModeNormal))
+	}
+	switch target {
+	case permission.PermissionModeSysadmin:
+		return util.CmdHandler(util.InfoMsg{Type: util.InfoTypeSysadmin, Msg: sysadminModeBannerMsg})
+	case permission.PermissionModeYolo:
+		return util.CmdHandler(util.InfoMsg{Type: util.InfoTypeYolo, Msg: yoloModeBannerMsg})
+	default:
+		return util.ReportInfo("Permission mode: " + permissionModeName(target))
+	}
+}
+
 // setEditorPrompt configures the textarea prompt function from the two
 // axes: bang mode overrides everything, then the purpose (planning has no
 // mutating tools, so its look is not a permission signal), then the
-// permission level.
-func (m *UI) setEditorPrompt() {
+// permission mode, with the auto classifier as the last posture under
+// normal mode.
+func (m *UI) setEditorPrompt(mode permission.PermissionMode) {
 	if m.bangMode {
 		m.textarea.SetPromptFunc(4, m.bangPromptFunc)
 		return
@@ -5003,10 +5095,14 @@ func (m *UI) setEditorPrompt() {
 		m.textarea.SetPromptFunc(4, m.planPromptFunc)
 		return
 	}
-	switch m.levelCached() {
-	case permission.LevelBypass:
+	switch {
+	case mode == permission.PermissionModeSysadmin:
+		m.textarea.SetPromptFunc(4, m.sysadminPromptFunc)
+	case mode == permission.PermissionModeYolo:
 		m.textarea.SetPromptFunc(4, m.yoloPromptFunc)
-	case permission.LevelAuto:
+	case m.levelCached() == permission.LevelAuto:
+		// A running auto classifier changes the editor's posture even in
+		// normal mode: it asks, just not a human.
 		m.textarea.SetPromptFunc(4, m.autoPromptFunc)
 	default:
 		m.textarea.SetPromptFunc(4, m.normalPromptFunc)
@@ -5039,13 +5135,16 @@ func (m *UI) updatePlaceholder() {
 	default:
 		m.textarea.Placeholder = m.readyPlaceholder
 	}
-	// The level speaks last, exactly as it did before this was extracted: it
-	// is the thing that changes most often and the thing the user is choosing.
+	// The permission state speaks last, exactly as it did before this was
+	// extracted: it is the thing that changes most often and the thing the
+	// user is choosing.
 	if m.summarizingNote == "" && !m.bangMode && !m.planning() {
-		switch m.levelCached() {
-		case permission.LevelBypass:
+		switch {
+		case m.permModeCached() == permission.PermissionModeSysadmin:
+			m.textarea.Placeholder = "Sysadmin mode!"
+		case m.levelCached() == permission.LevelBypass:
 			m.textarea.Placeholder = "Go crazy"
-		case permission.LevelAuto:
+		case m.levelCached() == permission.LevelAuto:
 			m.textarea.Placeholder = "Go carefully"
 		}
 	}
@@ -5199,10 +5298,11 @@ func (m *UI) setPurpose(agentID string) tea.Cmd {
 
 // Mode banner copy shown in the status bar after switching modes.
 const (
-	planModeBannerMsg = "Plan with Crush before generating any code."
-	yoloModeBannerMsg = "System level commands stay blocked. The rest run unprompted."
-	autoModeBannerMsg = "A classifier reviews each action: safe ones run, risky ones still ask."
-	promptLevelMsg    = "Permission prompts enabled."
+	planModeBannerMsg     = "Plan with Crush before generating any code."
+	yoloModeBannerMsg     = "System level commands stay blocked. The rest run unprompted."
+	sysadminModeBannerMsg = "All commands are unblocked. Use wisely."
+	autoModeBannerMsg     = "A classifier reviews each action: safe ones run, risky ones still ask."
+	promptLevelMsg        = "Permission prompts enabled."
 )
 
 // levelBanner is how each permission level explains itself, kept in one
@@ -5226,7 +5326,7 @@ func (m *UI) applyPurposeSwitch(msg modeSwitchedMsg) []tea.Cmd {
 		return []tea.Cmd{util.ReportError(msg.err)}
 	}
 	m.purpose = msg.agentID
-	m.setEditorPrompt()
+	m.setEditorPrompt(m.permModeCached())
 	// The palette may still be open behind the switch, so its mode row is
 	// brought in line with the purpose that actually took effect. A UI with no
 	// overlay has no palette to redraw and must not care.
@@ -5255,6 +5355,23 @@ type modeSwitchedMsg struct {
 	continueSessionID string
 	agentID           string
 	err               error
+}
+
+// sysadminPromptFunc returns the sysadmin mode editor prompt style with red
+// warning icon and red dots.
+func (m *UI) sysadminPromptFunc(info textarea.PromptInfo) string {
+	t := m.com.Styles
+	if info.LineNumber == 0 {
+		if info.Focused {
+			return t.Editor.PromptSysadminIconFocused.Render()
+		} else {
+			return t.Editor.PromptSysadminIconBlurred.Render()
+		}
+	}
+	if info.Focused {
+		return t.Editor.PromptSysadminDotsFocused.Render()
+	}
+	return t.Editor.PromptSysadminDotsBlurred.Render()
 }
 
 // closeCompletions closes the completions popup and resets state.
@@ -6314,16 +6431,12 @@ func (m *UI) setPlanReadyPending(sessionID string) {
 // by pressing enter on an empty editor while still in plan mode.
 func (m *UI) openPlanHandoff() {
 	inline := dialog.NewPlanHandoffInline(m.com)
-	inline.OnConfirm = func(bypassPermissions bool) tea.Cmd {
-		// The handoff offers "start coding" and "start coding without
-		// asking", so the choice names a level and the confirm applies it
-		// either way. The two axes stay independent: this sets the
-		// permission level and the purpose below, one after the other.
-		level := permission.LevelPrompt
-		if bypassPermissions {
-			level = permission.LevelBypass
+	inline.OnConfirm = func(yolo bool) tea.Cmd {
+		// The handoff asks a yes/no question about YOLO, so answer it
+		// literally: declining drops the session back to normal.
+		if m.yoloActive() != yolo {
+			m.setYolo(yolo)
 		}
-		m.setPermissionLevel(level)
 		m.setPlanReadyPending("")
 		sessionID := m.session.ID
 		cmd := m.setPurpose(config.AgentCoder)
@@ -6611,7 +6724,7 @@ func (m *UI) checkBangModeAfterPaste() {
 	m.textarea.SetValue(stripped)
 	col := m.textarea.Column()
 	m.textarea.SetCursorColumn(max(0, col-(len(val)-len(stripped))))
-	m.setEditorPrompt()
+	m.setEditorPrompt(m.permModeCached())
 }
 
 // handlePasteMsg handles a paste message.

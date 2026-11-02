@@ -185,6 +185,7 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				Messages:             c.messages,
 				Cfg:                  c.cfg,
 				Tools:                fetchTools,
+				titles:               &c.titles,
 			})
 
 			return c.runSubAgentMaybeBackground(ctx, tools.AgenticFetchToolName, accessRead, subAgentParams{

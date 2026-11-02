@@ -35,6 +35,7 @@ type countingWorkspace struct {
 	ready          bool
 	agentBusy      bool
 	level          permission.Level
+	permMode       permission.PermissionMode
 	queued         []string
 	model          workspace.AgentModel
 	lspStates      map[string]workspace.LSPClientInfo
@@ -83,8 +84,19 @@ func (w *countingWorkspace) AgentQueuedPromptsList(string) []string {
 	return w.queued
 }
 
-func (w *countingWorkspace) PermissionLevel() permission.Level {
+func (w *countingWorkspace) PermissionMode() permission.PermissionMode {
 	w.permCalls++
+	return w.permMode
+}
+
+func (w *countingWorkspace) PermissionSetMode(mode permission.PermissionMode) {
+	w.permSetCalls++
+	w.permMode = mode
+}
+
+// PermissionLevel reads the level axis without counting: the busy probe
+// refreshes both axes together, and the counts pin permission-mode reads.
+func (w *countingWorkspace) PermissionLevel() permission.Level {
 	return w.level
 }
 
@@ -211,6 +223,7 @@ func pinTTLs(t *testing.T) {
 func warmCaches(m *UI, busy bool) {
 	m.agentBusyCache.set(busy)
 	m.levelCache.set(permission.LevelPrompt)
+	m.permModeCache.set(permission.PermissionModeNormal)
 	m.agentReady = true
 	m.promptQueueCheckedAt = time.Now()
 	m.lspCheckedAt = time.Now()
@@ -273,6 +286,7 @@ func TestReadsNeverProbeWorkspace(t *testing.T) {
 	for range 10 {
 		m.isAgentBusy()
 		m.levelCached()
+		m.permModeCached()
 	}
 	require.Zero(t, ws.syncProbes(), "cache reads must never probe the workspace")
 }
@@ -443,6 +457,60 @@ func TestLocalLevelChangeSupersedesInFlightProbe(t *testing.T) {
 	cmds := m.applyBusyState(busyStateMsg{gen: staleGen, level: permission.LevelPrompt})
 	require.Equal(t, permission.LevelAuto, m.levelCached(),
 		"stale probe must not overwrite the freshly set level")
+	require.NotEmpty(t, cmds, "stale probe must re-dispatch an authoritative refresh")
+	require.True(t, m.busyFetchInFlight, "re-dispatched refresh must be in flight")
+}
+
+// TestToggleYoloWritesThroughCache: both permission-mode toggle paths share
+// toggleMode, which must write the known new value through the cache —
+// no invalidation, no re-probe.
+func TestToggleYoloWritesThroughCache(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{ready: true, permMode: permission.PermissionModeNormal}
+	m := newBusyUI(ws)
+
+	got := m.toggleMode(permission.PermissionModeYolo)
+	require.True(t, got)
+	require.Equal(t, 1, ws.permSetCalls)
+	readsAfterToggle := ws.permCalls
+	require.Equal(t, 1, readsAfterToggle, "toggle reads the authoritative value exactly once")
+
+	require.Equal(t, permission.PermissionModeYolo, m.permModeCached(), "the new value must be served from the cache")
+	require.True(t, m.permModeCache.fresh(busyCacheTTL), "write-through must stamp the cache fresh")
+	m.permModeCached()
+	require.Equal(t, readsAfterToggle, ws.permCalls, "reads after the toggle must not re-probe")
+
+	got = m.toggleMode(permission.PermissionModeYolo)
+	require.False(t, got)
+	require.Equal(t, permission.PermissionModeNormal, m.permModeCached())
+}
+
+// TestLocalYoloToggleSupersedesInFlightProbe pins the generation bump in
+// toggleMode: a busy/permission probe dispatched before the toggle carries
+// the old generation. Without advancing busyFetchGen its stale result would
+// land with a still-matching generation and clobber the just-toggled value.
+func TestLocalYoloToggleSupersedesInFlightProbe(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{ready: true, permMode: permission.PermissionModeNormal}
+	m := newBusyUI(ws)
+	warmCaches(m, false)
+
+	// A busy/permission probe carrying the pre-toggle generation is in flight.
+	m.busyFetchInFlight = true
+	staleGen := m.busyFetchGen
+
+	require.True(t, m.toggleMode(permission.PermissionModeYolo))
+	require.NotEqual(t, staleGen, m.busyFetchGen,
+		"toggle must advance the busy generation to supersede in-flight probes")
+	require.Equal(t, permission.PermissionModeYolo, m.permModeCached(), "toggle must write the new value through the cache")
+
+	// The stale probe (old generation, old mode=normal) lands.
+	m.busyFetchInFlight = true
+	cmds := m.applyBusyState(busyStateMsg{gen: staleGen, permMode: permission.PermissionModeNormal})
+	require.Equal(t, permission.PermissionModeYolo, m.permModeCached(),
+		"stale probe must not overwrite the freshly toggled value")
 	require.NotEmpty(t, cmds, "stale probe must re-dispatch an authoritative refresh")
 	require.True(t, m.busyFetchInFlight, "re-dispatched refresh must be in flight")
 }
@@ -886,22 +954,25 @@ func TestRemoteLevelChangeUpdatesEditorPrompt(t *testing.T) {
 	m.textarea.Focus()
 	m.textarea.SetWidth(40)
 	m.levelCache.set(permission.LevelPrompt)
-	m.setEditorPrompt()
+	m.permModeCache.set(permission.PermissionModeNormal)
+	m.setEditorPrompt(permission.PermissionModeNormal)
 	normalPrompt := ansi.Strip(m.textarea.View())
 
-	// A remote change moves the level to bypass; delivered via an
-	// off-thread refresh.
-	m.applyBusyState(busyStateMsg{gen: m.busyFetchGen, level: permission.LevelBypass})
+	// A remote change moves the level to bypass with yolo on its mode;
+	// delivered via an off-thread refresh.
+	m.applyBusyState(busyStateMsg{gen: m.busyFetchGen, level: permission.LevelBypass, permMode: permission.PermissionModeYolo})
 	require.Equal(t, permission.LevelBypass, m.levelCached(),
 		"the refresh must write the new level through the cache")
+	require.Equal(t, permission.PermissionModeYolo, m.permModeCached(),
+		"the refresh must write the new mode through the cache")
 	bypassPrompt := ansi.Strip(m.textarea.View())
 	require.NotEqual(t, normalPrompt, bypassPrompt,
-		"a remote level change must change the rendered editor prompt")
+		"a remote change must change the rendered editor prompt")
 	require.Contains(t, bypassPrompt, "!",
 		"the bypass prompt icon must render after a remote change")
 
 	// Returning to the prompting level restores the normal prompt.
-	m.applyBusyState(busyStateMsg{gen: m.busyFetchGen, level: permission.LevelPrompt})
+	m.applyBusyState(busyStateMsg{gen: m.busyFetchGen, level: permission.LevelPrompt, permMode: permission.PermissionModeNormal})
 	require.Equal(t, permission.LevelPrompt, m.levelCached())
 	require.Equal(t, normalPrompt, ansi.Strip(m.textarea.View()),
 		"returning to prompting must restore the normal editor prompt")

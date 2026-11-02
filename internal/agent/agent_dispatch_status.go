@@ -156,6 +156,9 @@ func dispatchHistory(msgs []message.Message) dispatchRecords {
 				}
 				if record, ok := records.byLabel[meta.Label]; ok {
 					record.Open = true
+					if meta.Model != "" || meta.Reasoning != "" {
+						record.Model, record.Provider, record.Reasoning = meta.Model, meta.Provider, meta.Reasoning
+					}
 				}
 			case AgentToolName, tools.AgenticFetchToolName:
 				// A blocking subagent that outran the threshold and was
@@ -430,7 +433,11 @@ func (c *coordinator) subAgentActivity(ctx context.Context, sessionID string) su
 				outcome = "error"
 			}
 		}
-		progress.recentCalls = append(progress.recentCalls, fmt.Sprintf("%s %s [%s]", call.Name, truncateForStatus(compactJSON(call.Input), 120), outcome))
+		line := call.Name
+		if input := truncateForStatus(compactJSON(call.Input), 120); input != "" {
+			line += " " + input
+		}
+		progress.recentCalls = append(progress.recentCalls, fmt.Sprintf("%s [%s]", line, outcome))
 	}
 	if n := len(progress.recentCalls); n > 0 {
 		progress.lastCall = progress.recentCalls[n-1]

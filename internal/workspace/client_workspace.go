@@ -450,6 +450,14 @@ func (w *ClientWorkspace) PermissionDeny(perm permission.PermissionRequest) bool
 	return resolved
 }
 
+func (w *ClientWorkspace) PermissionMode() permission.PermissionMode {
+	return proto.ProtoModeToPermission(w.cached().PermissionMode)
+}
+
+func (w *ClientWorkspace) PermissionSetMode(mode permission.PermissionMode) {
+	_ = w.client.SetPermissionMode(context.Background(), w.workspaceID(), proto.PermissionModeToProto(mode))
+}
+
 // -- Host context --
 
 func (w *ClientWorkspace) HostContext(ctx context.Context) (proto.HostContext, error) {
@@ -463,11 +471,11 @@ func (w *ClientWorkspace) PermissionLevel() permission.Level {
 	if err == nil {
 		return level
 	}
-	// A server from before the level endpoint still reports the two
-	// switches it has. Derive the level from those rather than answering
-	// "prompt", which would tell the user they are about to be asked while
-	// the server quietly approves everything.
-	if skip, err := w.client.GetPermissionsSkipRequests(ctx, w.workspaceID()); err == nil && skip {
+	// A server from before the level endpoint still reports the mode and
+	// the auto-mode switch. Derive the level from those rather than
+	// answering "prompt", which would tell the user they are about to be
+	// asked while the server quietly approves everything.
+	if mode := w.PermissionMode(); mode.SkipsPrompts() {
 		return permission.LevelBypass
 	}
 	if enabled, err := w.client.GetPermissionsAutoMode(ctx, w.workspaceID()); err == nil && enabled {
@@ -482,10 +490,14 @@ func (w *ClientWorkspace) PermissionSetLevel(level permission.Level) {
 	if err := w.client.SetPermissionsLevel(ctx, w.workspaceID(), level); err == nil {
 		return
 	}
-	// Older server: reproduce the level from the two switches it knows.
-	// Skip is cleared before auto is armed so there is no moment of
-	// unasked approval on the way to the classifier.
-	_ = w.client.SetPermissionsSkipRequests(ctx, w.workspaceID(), level == permission.LevelBypass)
+	// Older server: reproduce the level from the mode and the auto-mode
+	// switch. The mode is cleared before auto is armed so there is no
+	// moment of unasked approval on the way to the classifier.
+	mode := proto.WorkspacePermissionModeNormal
+	if level == permission.LevelBypass {
+		mode = proto.WorkspacePermissionModeYolo
+	}
+	_ = w.client.SetPermissionMode(ctx, w.workspaceID(), mode)
 	_ = w.client.SetPermissionsAutoMode(ctx, w.workspaceID(), level == permission.LevelAuto)
 }
 
@@ -1148,13 +1160,13 @@ func (w *ClientWorkspace) recoverWorkspace() error {
 func (w *ClientWorkspace) recreateArgs() proto.Workspace {
 	ws := w.cached()
 	return proto.Workspace{
-		Path:     ws.Path,
-		DataDir:  ws.DataDir,
-		Debug:    ws.Debug,
-		YOLO:     ws.YOLO,
-		Channels: ws.Channels,
-		Env:      ws.Env,
-		Version:  version.Version,
+		Path:           ws.Path,
+		DataDir:        ws.DataDir,
+		Debug:          ws.Debug,
+		PermissionMode: ws.PermissionMode,
+		Channels:       ws.Channels,
+		Env:            ws.Env,
+		Version:        version.Version,
 	}
 }
 
@@ -1333,6 +1345,7 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 				Action:      e.Payload.Action,
 				Path:        e.Payload.Path,
 				Params:      e.Payload.Params,
+				Danger:      e.Payload.Danger,
 			},
 		}
 	case pubsub.Event[proto.PermissionNotification]:
@@ -1480,6 +1493,13 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 			theme = nil
 		}
 		return HostThemeEvent{Theme: theme}
+	case pubsub.Event[proto.PermissionModeEvent]:
+		// Keep the cached workspace in sync so PermissionMode() never goes
+		// stale when another client or the server changes the mode.
+		w.mu.Lock()
+		w.ws.PermissionMode = e.Payload.Mode
+		w.mu.Unlock()
+		return nil
 	default:
 		slog.Warn("Unknown event type in translateEvent", "type", fmt.Sprintf("%T", ev))
 		return nil

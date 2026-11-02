@@ -62,8 +62,18 @@ func (m *mockPermissionService) SetLevel(permission.Level) {}
 
 func (m *mockPermissionService) Level() permission.Level { return permission.LevelPrompt }
 
+func (m *mockPermissionService) SetPermissionMode(mode permission.PermissionMode) {}
+
+func (m *mockPermissionService) PermissionMode() permission.PermissionMode {
+	return permission.PermissionModeNormal
+}
+
 func (m *mockPermissionService) SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[permission.PermissionNotification] {
 	return make(<-chan pubsub.Event[permission.PermissionNotification])
+}
+
+func (m *mockPermissionService) SubscribeModeChanges(ctx context.Context) <-chan pubsub.Event[permission.ModeChangedEvent] {
+	return make(<-chan pubsub.Event[permission.ModeChangedEvent])
 }
 
 type mockHistoryService struct {

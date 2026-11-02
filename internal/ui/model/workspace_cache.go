@@ -10,7 +10,7 @@ package model
 // yolo and ready/model caches synchronously so the first frame has values to
 // render; Init then refreshes them off-thread.)
 //
-//   - Reads (isAgentBusy, levelCached, promptQueue, selectedLargeModel,
+//   - Reads (isAgentBusy, permModeCached, levelCached, promptQueue, selectedLargeModel,
 //     lspInfo) always return the memoized value, stale or not.
 //   - State edges (message created, agent finished/errored, prompt
 //     submitted, cancel, session switch, yolo toggle, model change, LSP
@@ -27,6 +27,8 @@ package model
 import (
 	"slices"
 	"time"
+
+	"github.com/charmbracelet/crush/internal/message"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -68,6 +70,29 @@ func (c *ttlCache[T]) invalidate() {
 	c.at = time.Time{}
 }
 
+// modeTTLCache memoizes one permission-mode workspace probe result.
+type modeTTLCache struct {
+	val permission.PermissionMode
+	at  time.Time
+}
+
+// fresh reports whether the cached value is within its TTL.
+func (c *modeTTLCache) fresh(ttl time.Duration) bool {
+	return !c.at.IsZero() && time.Since(c.at) < ttl
+}
+
+// set writes a known-good value through the cache.
+func (c *modeTTLCache) set(val permission.PermissionMode) {
+	c.val = val
+	c.at = time.Now()
+}
+
+// invalidate marks the value stale so the next Update-tail backstop
+// re-probes; the last value keeps being served in the meantime.
+func (c *modeTTLCache) invalidate() {
+	c.at = time.Time{}
+}
+
 // busyStateMsg delivers the result of an off-thread busy/permission probe.
 type busyStateMsg struct {
 	// gen is the busy generation captured when the probe was dispatched.
@@ -78,6 +103,7 @@ type busyStateMsg struct {
 	gen       uint64
 	ready     bool
 	agentBusy bool
+	permMode  permission.PermissionMode
 	// forSession is the session sessionBusy was probed for.
 	forSession string
 	// sessionBusy reports whether forSession itself has a run in flight,
@@ -138,6 +164,7 @@ func (m *UI) currentSessionID() string {
 func (m *UI) invalidateBusyCaches() {
 	m.agentBusyCache.invalidate()
 	m.levelCache.invalidate()
+	m.permModeCache.invalidate()
 	m.busyFetchGen++
 }
 
@@ -172,6 +199,7 @@ func (m *UI) dispatchBusyRefresh() tea.Cmd {
 			}
 		}
 		st.level = ws.PermissionLevel()
+		st.permMode = ws.PermissionMode()
 		return st
 	}
 }
@@ -202,16 +230,19 @@ func (m *UI) applyBusyState(msg busyStateMsg) []tea.Cmd {
 	}
 	prevBusy := m.isAgentBusy()
 	prevLevel := m.levelCached()
+	prevMode := m.permModeCached()
 	m.agentBusyCache.set(msg.agentBusy)
 	m.levelCache.set(msg.level)
+	m.permModeCache.set(msg.permMode)
 	m.agentReady = msg.ready
 	m.agentModel = msg.model
-	if prevLevel != msg.level {
-		// A remote/async toggle changed the permission level: update the
-		// editor prompt function so the prompt icon/style tracks the new
-		// level. The cache is written above and the placeholder is
-		// refreshed by the Update tail.
-		m.setEditorPrompt()
+	if prevMode != msg.permMode || prevLevel != msg.level {
+		// A remote/async toggle changed the permission mode or the
+		// auto-mode flag beneath it: update the editor prompt function so
+		// the prompt icon/style tracks the new state. The caches are
+		// written above and the placeholder is refreshed by the Update
+		// tail.
+		m.setEditorPrompt(msg.permMode)
 	}
 
 	var cmds []tea.Cmd
@@ -292,6 +323,13 @@ func (m *UI) applyPromptQueue(msg promptQueueMsg) []tea.Cmd {
 	countChanged := len(msg.prompts) != m.promptQueue
 	m.promptQueueItems = msg.prompts
 	m.promptQueue = len(msg.prompts)
+	// A report waits in the queue until the model reads it, but its
+	// subagent is already done.
+	for _, prompt := range msg.prompts {
+		if report, ok := message.ParseSubAgentReportPrompt(prompt); ok {
+			m.markDispatchReported(report.Label)
+		}
+	}
 	if countChanged {
 		m.updateLayoutAndSize()
 	} else if itemsChanged {
@@ -309,7 +347,7 @@ func (m *UI) staleWorkspaceRefreshCmds() []tea.Cmd {
 		return nil
 	}
 	var cmds []tea.Cmd
-	if !m.agentBusyCache.fresh(busyCacheTTL) || !m.levelCache.fresh(busyCacheTTL) {
+	if !m.agentBusyCache.fresh(busyCacheTTL) || !m.levelCache.fresh(busyCacheTTL) || !m.permModeCache.fresh(busyCacheTTL) {
 		if cmd := m.dispatchBusyRefresh(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -333,20 +371,41 @@ func (m *UI) staleWorkspaceRefreshCmds() []tea.Cmd {
 }
 
 // setPermissionLevel writes a level through the workspace and the memoized
-// cache, then refreshes the editor prompt. The value is already known, so
+// caches, then refreshes the editor prompt. The value is already known, so
 // this is write-through rather than another probe; the generation bump still
-// discards any probe that was in flight with the previous level.
+// discards any probe that was in flight with the previous level. The mode
+// cache follows the level: bypass is a prompt-skipping mode, and prompt and
+// auto both run under normal mode with auto tracked by the level itself.
 func (m *UI) setPermissionLevel(level permission.Level) {
 	m.com.Workspace.PermissionSetLevel(level)
 	m.levelCache.set(level)
+	mode := permission.PermissionModeNormal
+	if level == permission.LevelBypass {
+		mode = permission.PermissionModeYolo
+	}
+	m.permModeCache.set(mode)
 	m.busyFetchGen++
-	m.setEditorPrompt()
+	m.setEditorPrompt(mode)
 }
 
 // levelCached reports the memoized permission level. Toggles write through
 // the cache; the Update-tail backstop keeps it bounded-stale otherwise.
 func (m *UI) levelCached() permission.Level {
 	return m.levelCache.val
+}
+
+// permModeCached reports the memoized permission mode. Toggles write
+// through the cache; the Update-tail backstop keeps it bounded-stale
+// otherwise.
+func (m *UI) permModeCached() permission.PermissionMode {
+	return m.permModeCache.val
+}
+
+// yoloActive reports whether the memoized permission mode skips permission
+// prompts. Sysadmin skips them too, differing from yolo only in dropping the
+// exec-time block list, which the input-mode cycle has no stake in.
+func (m *UI) yoloActive() bool {
+	return m.permModeCached() != permission.PermissionModeNormal
 }
 
 // permissionLevels is the cycle order for the permission axis: ask a human,

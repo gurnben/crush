@@ -321,6 +321,14 @@ func (w *AppWorkspace) PermissionDeny(perm permission.PermissionRequest) bool {
 	return w.app.Permissions.Deny(perm)
 }
 
+func (w *AppWorkspace) PermissionMode() permission.PermissionMode {
+	return w.app.Permissions.PermissionMode()
+}
+
+func (w *AppWorkspace) PermissionSetMode(mode permission.PermissionMode) {
+	w.app.Permissions.SetPermissionMode(mode)
+}
+
 // -- Host context --
 
 func (w *AppWorkspace) HostContext(_ context.Context) (proto.HostContext, error) {

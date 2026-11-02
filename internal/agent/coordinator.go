@@ -219,6 +219,10 @@ type coordinator struct {
 	readyWg errgroup.Group
 
 	hostContext csync.Value[proto.HostContext]
+
+	// titles is shared by every agent built here, sub-agents included, so
+	// CancelAll on the current agent drains all title generation.
+	titles titleTracker
 }
 
 // CoordinatorOptions holds the dependencies for NewCoordinator. Using a
@@ -381,12 +385,12 @@ func (c *coordinator) MainAgentNames() []string {
 
 // Run implements Coordinator.
 func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
-	return c.run(ctx, nil, nil, sessionID, prompt, attachments...)
+	return c.run(ctx, nil, nil, nil, sessionID, prompt, attachments...)
 }
 
 // RunAccepted implements Coordinator.
 func (c *coordinator) RunAccepted(ctx context.Context, accept *AcceptedRun, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
-	return c.run(ctx, accept, nil, sessionID, prompt, attachments...)
+	return c.run(ctx, accept, nil, nil, sessionID, prompt, attachments...)
 }
 
 // run is the shared implementation behind Run and RunAccepted. When
@@ -396,10 +400,16 @@ func (c *coordinator) RunAccepted(ctx context.Context, accept *AcceptedRun, sess
 // applies.
 // runSaved starts a turn on a user message already in the transcript.
 func (c *coordinator) runSaved(ctx context.Context, saved message.Message, prompt string) (*fantasy.AgentResult, error) {
-	return c.run(ctx, nil, &saved, saved.SessionID, prompt)
+	return c.run(ctx, nil, &saved, nil, saved.SessionID, prompt)
 }
 
-func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, saved *message.Message, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
+// runReport delivers a subagent report: it folds into a turn in progress, or
+// starts one.
+func (c *coordinator) runReport(ctx context.Context, sessionID string, report message.SubAgentReport) (*fantasy.AgentResult, error) {
+	return c.run(ctx, nil, nil, &report, sessionID, report.PromptText())
+}
+
+func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, saved *message.Message, report *message.SubAgentReport, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
 	if err := c.readyWg.Wait(); err != nil {
 		return nil, err
 	}
@@ -494,6 +504,7 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, saved *messa
 			Prompt:            prompt,
 			HostContext:       c.hostContext.Get(),
 			Saved:             saved,
+			Report:            report,
 			HiddenUserMessage: message.HiddenUserMessage(ctx),
 			Attachments:       attachments,
 			MaxOutputTokens:   maxTokens,
@@ -967,9 +978,9 @@ func (c *coordinator) buildAgentWithModels(ctx context.Context, ready *errgroup.
 		SystemPrompt:         "",
 		IsSubAgent:           isSubAgent,
 		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
-		Permissions:          c.permissions,
 		Sessions:             c.sessions,
 		Messages:             c.messages,
+		Permissions:          c.permissions,
 		Cfg:                  c.cfg,
 		Tools:                nil,
 		Notify:               c.notify,
@@ -977,6 +988,7 @@ func (c *coordinator) buildAgentWithModels(ctx context.Context, ready *errgroup.
 		Hooks:                c.hookRunner,
 		Ledger:               c.ledger,
 		ObserveMemory:        c.observesMemory(isSubAgent),
+		titles:               &c.titles,
 	})
 
 	// The readiness goroutines below perform one-time setup — building the
@@ -1058,7 +1070,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		allTools = append(allTools, dispatchTool)
 	}
 	if slices.Contains(allowed, AgentSendToolName) {
-		allTools = append(allTools, c.agentSendTool())
+		allTools = append(allTools, c.agentSendTool(parentModel))
 	}
 	if slices.Contains(allowed, AgentStatusToolName) {
 		allTools = append(allTools, c.agentStatusTool())
@@ -1087,7 +1099,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 
 	allTools = append(
 		allTools,
-		tools.NewBashTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.DataDirectory, c.cfg.Config().Options.Attribution, modelID, c.cfg.Config().Options.GetMaxBackgroundJobs()),
+		tools.NewBashTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.DataDirectory, c.cfg.Config().Options.Attribution, modelID, c.cfg.Config().Options.GetMaxBackgroundJobs(), c.cfg.Config().Permissions),
 		tools.NewCrushInfoTool(c.cfg, c.lspManager, c.allSkills, c.activeSkills, c.skillTracker),
 		tools.NewCrushLogsTool(logFile),
 		tools.NewJobOutputTool(c.cfg.Config().Options.DataDirectory),
@@ -2216,18 +2228,46 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		}
 	}
 
-	output := subAgentOutput(result)
-	if output == "" {
-		return fantasy.NewTextErrorResponse("Subagent completed but produced no text output."), nil
-	}
-	return fantasy.NewTextResponse(output), nil
+	return subAgentResponse(result), nil
 }
 
-func subAgentOutput(result *fantasy.AgentResult) string {
+const (
+	subAgentNoOutput  = "Subagent completed but produced no text output."
+	subAgentRefused   = "Subagent stopped early: the provider's safety classifier refused its response, so it never finished the task. The same task on the same model will likely be refused again; rephrase it or dispatch a new subagent on a different model."
+	subAgentTruncated = "Subagent stopped early: it ran out of output tokens mid-response, so it never finished the task. Ask it to continue in smaller steps."
+)
+
+// subAgentResponse turns a finished subagent run into the parent's tool
+// result. The run's last step decides: fantasy falls back to an earlier
+// step's text when the last one has none, which after a cut-short step is
+// narration, not a report.
+func subAgentResponse(result *fantasy.AgentResult) fantasy.ToolResponse {
 	if result == nil {
-		return ""
+		return fantasy.NewTextErrorResponse(subAgentNoOutput)
 	}
-	return result.Response.Content.Text()
+	var last fantasy.StepResult
+	if n := len(result.Steps); n > 0 {
+		last = result.Steps[n-1]
+	}
+	switch last.FinishReason {
+	case fantasy.FinishReasonContentFilter:
+		return fantasy.NewTextErrorResponse(withLastWords(subAgentRefused, last))
+	case fantasy.FinishReasonLength:
+		return fantasy.NewTextErrorResponse(withLastWords(subAgentTruncated, last))
+	}
+	if output := result.Response.Content.Text(); output != "" {
+		return fantasy.NewTextResponse(output)
+	}
+	return fantasy.NewTextErrorResponse(subAgentNoOutput)
+}
+
+// withLastWords appends whatever text the cut-short step did produce.
+func withLastWords(reason string, step fantasy.StepResult) string {
+	text := strings.TrimSpace(step.Content.Text())
+	if text == "" {
+		return reason
+	}
+	return reason + "\n\nIts last output before stopping:\n\n" + text
 }
 
 // updateParentSessionCost accumulates the cost from a child session to its parent session.

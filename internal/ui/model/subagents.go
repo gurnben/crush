@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/ui/chat"
 	"github.com/charmbracelet/crush/internal/ui/common"
 )
@@ -67,26 +68,34 @@ func (m *UI) runningSubAgents() int {
 }
 
 // subAgentRow renders one subagent's line: a spinner and elapsed time while
-// it works, so a glance distinguishes it from a static "online" dot.
+// it works; once finished, the icon's color alone says so.
 func (m *UI) subAgentRow(status chat.DispatchStatus, width int) string {
 	t := m.com.Styles
 
-	if !status.Running {
-		return common.Status(t, common.StatusOpts{
-			Icon:        t.Resource.OfflineIcon.String(),
-			Title:       chat.RenderSubagentName(t, status.Label),
-			Description: "done",
-		}, width)
+	icon := t.Resource.WorkingIcon.Render(subAgentSpinner(time.Now()))
+	state := "starting"
+	switch {
+	case !status.Running:
+		icon, state = t.Resource.OfflineIcon.String(), ""
+	case !status.Started.IsZero():
+		state = time.Since(status.Started).Round(time.Second).String()
+	}
+	var extra string
+	if state != "" {
+		extra = t.Resource.RowDescBase.Foreground(t.Resource.DefaultDescFg).Render(state)
 	}
 
-	description := "starting"
-	if !status.Started.IsZero() {
-		description = time.Since(status.Started).Round(time.Second).String()
+	// The label is the description so Status truncates it, not the state.
+	first, label := agent.SubagentDisplayName(status.Label)
+	title := t.Tool.AgentName.Render(first)
+	if first == "" {
+		title, label = t.Tool.AgentLabel.Render(label), ""
 	}
 	return common.Status(t, common.StatusOpts{
-		Icon:        t.Resource.WorkingIcon.Render(subAgentSpinner(time.Now())),
-		Title:       chat.RenderSubagentName(t, status.Label),
-		Description: description,
+		Icon:         icon,
+		Title:        title,
+		Description:  label,
+		ExtraContent: extra,
 	}, width)
 }
 

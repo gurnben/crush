@@ -213,6 +213,10 @@ type Workspace interface {
 	PermissionGrant(perm permission.PermissionRequest) bool
 	PermissionGrantPersistent(perm permission.PermissionRequest) bool
 	PermissionDeny(perm permission.PermissionRequest) bool
+	// PermissionMode reports the permission mode in effect; PermissionSetMode
+	// sets it: normal prompting, yolo, or sysadmin.
+	PermissionMode() permission.PermissionMode
+	PermissionSetMode(mode permission.PermissionMode)
 	// PermissionLevel reports how far the workspace may go without asking a
 	// human; PermissionSetLevel sets it. This is the permission axis and is
 	// independent of which agent serves the turn, so planning and coding can

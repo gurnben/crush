@@ -43,11 +43,11 @@ func TestLevelTransitions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			svc := NewPermissionService(t.TempDir(), false, nil, nil)
+			svc := NewPermissionService(t.TempDir(), nil, nil)
 			svc.SetLevel(tc.level)
 
 			assert.Equal(t, tc.level, svc.Level())
-			assert.Equal(t, tc.wantSkip, svc.SkipRequests())
+			assert.Equal(t, tc.wantSkip, svc.PermissionMode().SkipsPrompts())
 			assert.Equal(t, tc.wantAuto, svc.AutoMode())
 			assert.Equal(t, tc.wantString, tc.level.String())
 		})
@@ -60,7 +60,7 @@ func TestLevelTransitions(t *testing.T) {
 func TestLevelAfterBypassForgetsAuto(t *testing.T) {
 	t.Parallel()
 
-	svc := NewPermissionService(t.TempDir(), false, nil, nil)
+	svc := NewPermissionService(t.TempDir(), nil, nil)
 	svc.SetLevel(LevelAuto)
 	svc.SetLevel(LevelBypass)
 	assert.False(t, svc.AutoMode(), "bypass must not leave the classifier armed")
@@ -76,9 +76,9 @@ func TestLevelAfterBypassForgetsAuto(t *testing.T) {
 func TestLevelMatchesRequestOrder(t *testing.T) {
 	t.Parallel()
 
-	svc := NewPermissionService(t.TempDir(), false, nil, nil)
+	svc := NewPermissionService(t.TempDir(), nil, nil)
 	svc.SetAutoMode(true)
-	svc.SetSkipRequests(true)
+	svc.SetPermissionMode(PermissionModeYolo)
 
 	granted, err := svc.Request(context.Background(), CreatePermissionRequest{
 		SessionID:  "session",
@@ -94,7 +94,7 @@ func TestSetLevelForwardsToHooks(t *testing.T) {
 	t.Parallel()
 
 	hooks := &togglingHooks{}
-	svc := NewPermissionService(t.TempDir(), false, nil, nil)
+	svc := NewPermissionService(t.TempDir(), nil, nil)
 	svc.SetPermissionHooks(hooks)
 	svc.SetLevel(LevelAuto)
 	svc.SetLevel(LevelPrompt)

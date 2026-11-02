@@ -38,6 +38,9 @@ type Status struct {
 	// "[PLANNING] [AUTO MODE]".
 	purpose string
 	level   permission.Level
+	// permMode separates yolo from sysadmin, which the level axis collapses
+	// into a single bypass level.
+	permMode permission.PermissionMode
 }
 
 // NewStatus creates a new status bar and help model.
@@ -81,6 +84,12 @@ func (s *Status) Dismiss() {
 	s.msgSeq++
 }
 
+// SetPermMode records the permission mode so the bypass badge can tell yolo
+// from sysadmin.
+func (s *Status) SetPermMode(permMode permission.PermissionMode) {
+	s.permMode = permMode
+}
+
 // SetMode records the two axes the badges render: which agent serves the
 // turn, and how far it may go without asking.
 func (s *Status) SetMode(purpose string, level permission.Level) {
@@ -99,7 +108,11 @@ func (s *Status) modeBadge() string {
 	}
 	switch s.level {
 	case permission.LevelBypass:
-		badges = append(badges, t.Status.ModeBadgeYolo.String())
+		if s.permMode == permission.PermissionModeSysadmin {
+			badges = append(badges, t.Status.ModeBadgeSysadmin.String())
+		} else {
+			badges = append(badges, t.Status.ModeBadgeYolo.String())
+		}
 	case permission.LevelAuto:
 		badges = append(badges, t.Status.ModeBadgeAuto.String())
 	}
@@ -174,6 +187,9 @@ func (s *Status) Draw(scr uv.Screen, area uv.Rectangle) {
 	case util.InfoTypeAuto:
 		indStyle = s.com.Styles.Status.ModeBannerAutoBadge
 		msgStyle = s.com.Styles.Status.ModeBannerAuto
+	case util.InfoTypeSysadmin:
+		indStyle = s.com.Styles.Status.ModeBannerSysadminBadge
+		msgStyle = s.com.Styles.Status.ModeBannerSysadmin
 		indInset = badgeLeftInset
 	case util.InfoTypeError:
 		indStyle = s.com.Styles.Status.ErrorIndicator

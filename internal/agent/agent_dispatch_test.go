@@ -251,8 +251,15 @@ func TestAgentStatusToolReportsLiveAndInterruptedSubAgents(t *testing.T) {
 		Role: message.Assistant,
 		Parts: []message.ContentPart{
 			message.TextContent{Text: "looking around"},
+			message.ToolCall{ID: "x0", Name: "bash", Finished: true},
 			message.ToolCall{ID: "x1", Name: "grep", Input: `{"pattern": "foo"}`, Finished: true},
 		},
+	})
+	require.NoError(t, err)
+	// A call the provider cut off before any input was written.
+	_, err = env.messages.Create(ctx, childID, message.CreateMessageParams{
+		Role:  message.Tool,
+		Parts: []message.ContentPart{message.ToolResult{ToolCallID: "x0", Name: "bash", Content: "refused", IsError: true}},
 	})
 	require.NoError(t, err)
 	entry := newDispatchedAgent("live", accessRead, childID, parent.ID, nil)
@@ -275,6 +282,7 @@ func TestAgentStatusToolReportsLiveAndInterruptedSubAgents(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, resp.Content, "Task:\ndo live")
 	require.Contains(t, resp.Content, "Latest output:\nlooking around")
+	require.Contains(t, resp.Content, "\n- bash [error]\n")
 
 	resp, err = tool.Run(toolCtx, fantasy.ToolCall{ID: "s3", Name: AgentStatusToolName, Input: `{"label":"nope"}`})
 	require.NoError(t, err)
@@ -322,13 +330,13 @@ func TestReopenRestoresPrunedEntry(t *testing.T) {
 	})
 	entry := newDispatchedAgent("betty-pruned", accessRead, "child", parent.ID, agent)
 
-	require.True(t, c.reopen(entry, "more please"))
+	require.True(t, c.reopen(entry, "more please", nil))
 	got, ok := c.dispatched.Get(dispatchKey(parent.ID, "betty-pruned"))
 	require.True(t, ok, "a reopened subagent is registered again")
 	require.Same(t, entry, got)
 	require.True(t, got.running())
 
-	require.False(t, c.reopen(entry, "again"), "a second follow-up does not start a second run")
+	require.False(t, c.reopen(entry, "again", nil), "a second follow-up does not start a second run")
 	// Stopped rather than finished, so no report turn starts on the parent.
 	entry.stop("test done")
 	close(release)
